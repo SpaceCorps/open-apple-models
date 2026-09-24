@@ -270,8 +270,25 @@ compaction.
 
 ### Guardrail fallbacks
 
-When `fallbackOnGuardrail` is on (the default), a blocked or refused turn
-returns an in-character `DialogueTurn` with `isFallback == true`. The line
+Each turn goes through up to three stages:
+
+1. **Structured reply.** With the default `replyFormat: .automatic`, the
+   NPC first asks for the full structured reply: emotion, line, suggested
+   replies and `endsConversation`.
+2. **Plain-text retry.** If the guardrails block that reply (or the model
+   refuses), the NPC retries the turn once as a plain-text line tagged with
+   an emotion. Tools are switched off for the retry. The results of any
+   tools already called are passed into the prompt, so the retried answer
+   is still grounded and side-effecting tools don't run twice. Retried
+   turns have no suggested replies. Guided (JSON) generation trips the
+   guardrails far more often than plain text, so this rescues most blocked
+   turns. In a live run, an orc warchief answered five hostile lines ("Your
+   warband burned my village. You will pay.", "Stand aside or I'll cut you
+   down.", …) with 0 fallbacks. Two of the five turns were rescued by the
+   retry, and each turn took 1.1–2.5 s.
+3. **Canned fallback line.** When `fallbackOnGuardrail` is on (the
+   default), a turn blocked even as text returns an in-character
+   `DialogueTurn` with `isFallback == true`. The line
 rotates through `fallbackLines`; the defaults are "Let's talk about
 something else." and similar. The failed exchange is rolled back from the
 history, and staged memory changes are discarded. Tool side effects that
@@ -290,7 +307,13 @@ A bark is a separate one-off session: no history, memory or tools, one
 sentence, `barkMaximumTokens` (48). It can run during a conversation. Barks
 throw on guardrails; skip the bark when that happens.
 
-### Plain-text replies
+### Reply formats
+
+| `replyFormat` | Behavior |
+| --- | --- |
+| `.automatic` (default) | Structured reply, with a plain-text retry when guardrails block it (see above). |
+| `.structured` | Structured only; blocked turns go straight to fallback lines. |
+| `.text` | Plain text only: fastest, and works with permissive guardrails. |
 
 `NPCOptions(replyFormat: .text)` asks for plain text that starts with an
 emotion tag, such as `[gruff] Three swords, lad.` The tag is parsed
@@ -447,7 +470,13 @@ is a single run; expect noise.
   called. Apple designed this mode for transforming text. Review Apple's
   acceptable-use requirements for the Foundation Models framework before
   using it for dialogue. The library never enables it by default.
-- **Handling.** `NPC` returns fallback turns (`isFallback`),
+- **Guided vs. plain text.** Across five lines from mild to graphic, JSON
+  output passed 2–3/5 while plain text passed 4/5 (default guardrails) or
+  5/5 (permissive). Even "I challenge you to a duel, orc!" failed as JSON in
+  all four guardrail/framing combinations. This is why `.automatic`
+  retries as text (see docs/RESEARCH.md §5).
+- **Handling.** `NPC` retries blocked structured turns as text, then
+  returns fallback turns (`isFallback`),
   `DecisionEngine` accepts `fallbackOptionID`, and `bark` and
   `ContentGenerator` throw `AgentError` with code `.guardrailViolation`.
   Design every AI path with a scripted fallback.
