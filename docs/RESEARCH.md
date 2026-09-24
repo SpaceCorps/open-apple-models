@@ -67,6 +67,8 @@ Apple's own route to the same result is a dynamic profile whose `.toolCallingMod
 - **Latency, warm:** time to first token 0.5 to 0.9 s, short replies 1 to 2 s. Cold start or `prewarm` adds 1 to 3 s, and under heavy load single steps took 10 to 50 s. `prewarm()` cuts the first-turn time to first token to about 0.6 s.
 - **Usage:** `usage.input.cachedTokenCount` was 0 on the on-device model in every run.
 - **Under load:** transient `ModelManagerError 1012` errors appeared.
+- **Upstream crash:** `LanguageModelSession.streamResponse` with tool calls crashes rarely: "_ContiguousArrayStorage deallocated with non-zero retain count 2", inside FoundationModels frames. The reproduction was a 20-line custom model with no code from this package, and the crash hit 2 of 3 runs of 16,000 single-session turns. Non-streaming `respond` ran clean for 80,000 turns. `AgentConfiguration.streamsResponses = false` avoids it.
+- **Cancellation:** after a cancel, `isResponding` turns false at once, while the framework's internal task can still be finishing a step or tool call. When it ends, it restores its pre-turn transcript snapshot. The agent waits for its in-flight steps and tool calls to drain before it releases the turn queue, so the late restore can't erase the next turn.
 
 ## 5. Guardrails and game content
 

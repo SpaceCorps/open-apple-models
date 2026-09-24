@@ -172,12 +172,30 @@ let decision = try await DecisionEngine().decide(
 decision.optionID   // "flee" (confidence 75, reasoning included)
 ```
 
-NPCs have memory (facts and a relationship score, both managed by tools), automatic history compaction, secrets that unlock as the relationship grows, barks, and Codable save/restore. Guardrail-blocked turns are retried as plain text before falling back to a canned line. `ContentGenerator` produces schema-shaped items, quests and loot. See [docs/GAMES.md](docs/GAMES.md) for the guide, prompting tips for the ~3B model, and measured latencies.
+NPCs have memory (facts and a relationship score, which the model updates through opt-in tools: `NPCOptions(memoryTools: .all)`), automatic history compaction, secrets that unlock as the relationship grows, barks, and Codable save/restore. By default (`replyFormat: .automatic`) a turn is a structured reply. If the guardrails block it, the NPC retries once as plain text before falling back to a canned line. `ContentGenerator` produces schema-shaped items, quests and loot. See [docs/GAMES.md](docs/GAMES.md) for the guide, prompting tips for the ~3B model, and measured latencies.
 
 ## CLI: `oam`
 
-<!-- filled from the CLI -->
-See [docs/CLI.md](docs/CLI.md).
+`oam` is Apple's `fm` CLI with tools. It has `respond`, `chat`, `serve`, `schema` and `available`, plus tool calling: shell commands become tools the model can call, and other tools are answered by your own program.
+
+```bash
+swift build -c release --product oam && cp .build/release/oam /usr/local/bin/
+
+# Command-backed tools: arguments JSON on stdin, output on stdout
+oam respond --tools tools.json --tool-choice required 'What is the weather in Paris?'
+# → The current weather in Paris is 14°C with light rain.
+
+# External tools: exit code 10 hands the call to your script; resume with the result
+oam respond --tools shop.json 'Where is my order A17?'           # exit 10, prints the pending calls
+oam respond --resume /tmp/oam-1a2b.json --tool-output 'call_id={"status":"shipped","eta":"Friday"}'
+# → Your order A17 has shipped and should arrive on Friday.
+
+oam serve                 # OpenAI-compatible server with tool_calls (port 1976)
+oam stdio                 # JSON-RPC bridge for game engines over stdin/stdout
+oam demo tavern           # talk to an NPC innkeeper who uses tools
+```
+
+It reads schema files from `fm schema object` and resumes `fm --save-transcript` files. Exit codes are stable (10 = tool calls pending), and there's `--json`/`--events` output for scripts plus `OAM_SCRIPT` for testing without Apple Intelligence. See [docs/CLI.md](docs/CLI.md).
 
 ## OpenAI-compatible server
 
@@ -209,10 +227,10 @@ One JSON-RPC 2.0 protocol, two transports: newline-delimited JSON over **stdio**
 ```text
 → {"jsonrpc":"2.0","id":2,"method":"session/create","params":{"session":"guard","instructions":"You are a castle guard. Use tools to act.","tools":[{"name":"open_gate","description":"Open a named gate.","parameters":{"type":"object","properties":{"gate":{"type":"string"}}}}],"options":{"toolChoice":"required"}}}
 → {"jsonrpc":"2.0","id":3,"method":"session/respond","params":{"session":"guard","prompt":"Please open the north gate.","stream":true}}
-← {"jsonrpc":"2.0","id":"t-1","method":"tool/call","params":{"session":"guard","call":{"id":"call_NYH7…","name":"open_gate","arguments":{"gate":"north"}}}}
+← {"jsonrpc":"2.0","id":"t-1","method":"tool/call","params":{"session":"guard","requestId":3,"call":{"id":"call_NYH7…","name":"open_gate","arguments":{"gate":"north"}}}}
 → {"jsonrpc":"2.0","id":"t-1","result":{"output":{"opened":false,"reason":"the portcullis chain is jammed"}}}
-← {"jsonrpc":"2.0","method":"session/event","params":{"session":"guard","event":{"type":"text","delta":"The north gate",…}}}
-← {"jsonrpc":"2.0","id":3,"result":{"text":"The north gate remains shut because the portcullis chain is jammed.",…}}
+← {"jsonrpc":"2.0","method":"session/event","params":{"session":"guard","requestId":3,"event":{"type":"text","delta":"The north gate",…}}}
+← {"jsonrpc":"2.0","id":3,"result":{"session":"guard","text":"The north gate remains shut because the portcullis chain is jammed.",…}}
 ```
 
 ```c
@@ -247,7 +265,8 @@ OAM_LIVE_TESTS=1 swift test
 - **Platforms:** iOS, iPadOS, macOS and visionOS 27 (Mac Catalyst via iOS). The system model needs Apple Intelligence; check `SystemLanguageModel.default.availability`.
 - **Context:** the on-device context is 8,192 tokens. Agents trim old turns automatically, and `compactHistory()` summarizes them.
 - **Tools per request:** Apple recommends at most 3–5 on-device. Narrow them per turn with `ToolPolicy(enabledTools:)`.
-- **Guardrails:** generating dialogue as JSON trips guardrails much more often than plain text. The game layer generates lines as text and handles guardrail errors in character. See [docs/RESEARCH.md](docs/RESEARCH.md#5-guardrails-and-game-content).
+- **Guardrails:** generating dialogue as JSON trips guardrails much more often than plain text. NPC turns are structured by default and are retried once as plain text when blocked. Use `NPCOptions(replyFormat: .text)` to always generate plain text. See [docs/RESEARCH.md](docs/RESEARCH.md#5-guardrails-and-game-content).
+- **Streaming and an upstream crash:** FoundationModels 27.0 crashes rarely (roughly once in 10,000+ turns) inside `streamResponse` when tools are involved. Long-running hosts that don't need token streaming can set `AgentConfiguration(streamsResponses: false)`.
 - **Toolchain:** building with only the Command Line Tools works, but Apple's `@Generable` macros need Xcode. This package never needs them.
 - Use of the model is subject to Apple's [acceptable use requirements](https://developer.apple.com/apple-intelligence/acceptable-use-requirements-for-the-foundation-models-framework/).
 

@@ -56,7 +56,8 @@ let gorm = try NPC(
     world: world,
     options: NPCOptions(
         groundingTool: "check_inventory",                        // look up stock every turn
-        worldContextPaths: ["player.name", "player.gold", "time_of_day"]))
+        worldContextPaths: ["player.name", "player.gold", "time_of_day"],
+        memoryTools: .changeRelationship))                       // lets him warm up to the player
 
 gorm.prewarm()
 let turn = try await gorm.talk("Evening! Got any iron swords? How much?")
