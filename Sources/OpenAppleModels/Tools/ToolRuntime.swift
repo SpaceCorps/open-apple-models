@@ -174,25 +174,30 @@ final class ToolRuntime: Sendable {
                 return .error(Self.describe(error))
             }
         }
-        guard let timeout else { return await body() }
+        // Always race the handler against cancellation (and the timeout): a
+        // handler that ignores cancellation must not keep the framework's
+        // turn alive, or its late completion can roll back newer history.
         return await withTimeout(timeout, call: call, body)
     }
 
     /// Races `body` against a timer. Unlike a task group, this returns as soon
     /// as either finishes, even if `body` ignores cancellation (it is
     /// cancelled and left to finish on its own).
-    private static func withTimeout(_ timeout: Duration, call: ToolCall, _ body: @escaping @Sendable () async -> ToolOutput) async -> ToolOutput {
+    private static func withTimeout(_ timeout: Duration?, call: ToolCall, _ body: @escaping @Sendable () async -> ToolOutput) async -> ToolOutput {
         let race = FirstResult<ToolOutput>()
         return await withTaskCancellationHandler {
             await race.wait { race in
                 let work = Task { race.deliver(await body()) }
-                let timer = Task {
-                    try? await Task.sleep(for: timeout)
-                    race.deliver(.error("Tool '\(call.name)' timed out after \(timeout.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))."))
+                let timer = timeout.map { timeout in
+                    Task {
+                        try? await Task.sleep(for: timeout)
+                        guard !Task.isCancelled else { return }
+                        race.deliver(.error("Tool '\(call.name)' timed out after \(timeout.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))."))
+                    }
                 }
                 race.onDelivery {
                     work.cancel()
-                    timer.cancel()
+                    timer?.cancel()
                 }
             }
         } onCancel: {

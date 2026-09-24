@@ -63,7 +63,12 @@ public final class DialogueStream: AsyncSequence, Sendable {
             state.cancelled = true
             return state.run
         }
-        run?.cancel()
+        if let run {
+            run.cancel()
+        } else {
+            // Still queued behind another turn (or background work): end now.
+            fail(AgentError(.cancelled, "The turn was cancelled."))
+        }
     }
 
     public var isCancelled: Bool { state.withLock { $0.cancelled } }
@@ -75,6 +80,22 @@ public final class DialogueStream: AsyncSequence, Sendable {
     public func turn(
         externalTools: (@Sendable (ToolCall) async throws -> ToolOutput)? = nil
     ) async throws(AgentError) -> DialogueTurn {
+        // Cancelling the awaiting task cancels the turn.
+        let result: Result<DialogueTurn, AgentError> = await withTaskCancellationHandler {
+            do {
+                return .success(try await consume(externalTools: externalTools))
+            } catch {
+                return .failure(AgentError(error))
+            }
+        } onCancel: {
+            self.cancel()
+        }
+        return try result.get()
+    }
+
+    private func consume(
+        externalTools: (@Sendable (ToolCall) async throws -> ToolOutput)?
+    ) async throws -> DialogueTurn {
         do {
             for try await event in self {
                 switch event {
@@ -97,6 +118,7 @@ public final class DialogueStream: AsyncSequence, Sendable {
         } catch {
             throw AgentError(error)
         }
+        if Task.isCancelled { throw AgentError(.cancelled, "The turn was cancelled.") }
         throw AgentError(.generationFailed, "The dialogue turn ended without a reply.")
     }
 

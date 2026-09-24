@@ -90,10 +90,15 @@ public final class ModelScript: Sendable {
     private let state: Mutex<(steps: [Step], requests: [ModelRequest])>
     /// Step used when the script runs out.
     public let fallback: Step
+    /// Whether ``requests`` are recorded. Turn this off for long-running
+    /// scripted sessions (e.g. a game in development), since each record
+    /// holds a copy of the transcript.
+    public let recordsRequests: Bool
 
-    public init(_ steps: [Step], fallback: Step = .text("(script exhausted)")) {
+    public init(_ steps: [Step], fallback: Step = .text("(script exhausted)"), recordsRequests: Bool = true) {
         state = Mutex((steps, []))
         self.fallback = fallback
+        self.recordsRequests = recordsRequests
     }
 
     /// Requests received so far, in order.
@@ -107,7 +112,7 @@ public final class ModelScript: Sendable {
 
     func next(for request: ModelRequest) -> Step {
         state.withLock { state in
-            state.requests.append(request)
+            if recordsRequests { state.requests.append(request) }
             return state.steps.isEmpty ? fallback : state.steps.removeFirst()
         }
     }

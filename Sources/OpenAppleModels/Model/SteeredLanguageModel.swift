@@ -91,7 +91,7 @@ public struct ContextPolicy: Sendable, Hashable {
     public init(trimsHistory: Bool = true, reservedResponseTokens: Int = 1024, minimumRecentTurns: Int = 1) {
         self.trimsHistory = trimsHistory
         self.reservedResponseTokens = reservedResponseTokens
-        self.minimumRecentTurns = minimumRecentTurns
+        self.minimumRecentTurns = max(0, minimumRecentTurns)
     }
 
     public static let `default` = ContextPolicy()
@@ -107,6 +107,14 @@ public struct ModelStep: Sendable, Hashable {
     public var enabledTools: [String]
     /// History entries hidden from the model to fit the context window.
     public var trimmedEntries: Int
+
+    public init(index: Int, completedToolRounds: Int, toolCallingMode: GenerationOptions.ToolCallingMode.Kind, enabledTools: [String], trimmedEntries: Int) {
+        self.index = index
+        self.completedToolRounds = completedToolRounds
+        self.toolCallingMode = toolCallingMode
+        self.enabledTools = enabledTools
+        self.trimmedEntries = trimmedEntries
+    }
 }
 
 /// Decides the tool-calling mode, enabled tools and visible history for

@@ -25,10 +25,11 @@ public struct ToolCall: Sendable, Hashable, Codable, Identifiable {
 /// Thrown by ``ToolCall`` accessors when an argument is missing or mistyped.
 /// Tool errors are reported back to the model, which usually retries with
 /// corrected arguments.
-public struct ToolArgumentError: Error, Sendable, CustomStringConvertible {
+public struct ToolArgumentError: LocalizedError, Sendable, CustomStringConvertible {
     public var message: String
     public init(message: String) { self.message = message }
     public var description: String { message }
+    public var errorDescription: String? { message }
 }
 
 extension ToolCall {

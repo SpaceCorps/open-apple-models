@@ -443,6 +443,10 @@ public final class Agent: Sendable {
                 }
                 try? await Task.sleep(for: wait)
                 delay *= 2
+                if Task.isCancelled {
+                    turn.finish(with: .failure(AgentError(.cancelled, "The turn was cancelled.")))
+                    return
+                }
             }
         }
     }

@@ -133,11 +133,12 @@ extension JSONValue {
     }
 }
 
-public struct JSONParseError: Error, Sendable, Equatable, CustomStringConvertible {
+public struct JSONParseError: LocalizedError, Sendable, Equatable, CustomStringConvertible {
     public var message: String
     public var offset: Int
 
     public var description: String { "Invalid JSON at byte \(offset): \(message)" }
+    public var errorDescription: String? { description }
 }
 
 private struct JSONParser {

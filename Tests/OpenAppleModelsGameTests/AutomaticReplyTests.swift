@@ -127,3 +127,34 @@ struct LiveAutomaticReplyTests {
         #expect(npc.memory.relationship == 5)
     }
 }
+
+@Suite struct DialogueCancellationTests {
+    @Test func cancellingTheCallerOfTalkCancelsTheTurn() async throws {
+        let script = ModelScript([.delayed(.seconds(5), Fixtures.reply("too late"))])
+        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script))
+        let task = Task { try await npc.talk("Hello?") }
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("expected cancellation")
+        } catch let error as AgentError {
+            #expect(error.code == .cancelled)
+        }
+        await npc.waitUntilIdle()
+        #expect(npc.turnCount == 0)
+    }
+
+    @Test func cancellingAQueuedTalkEndsItImmediately() async throws {
+        let script = ModelScript([.delayed(.seconds(2), Fixtures.reply("first")), Fixtures.reply("never")])
+        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script))
+        let first = npc.talkStream("one")
+        let second = npc.talkStream("two")
+        let clock = ContinuousClock()
+        let start = clock.now
+        second.cancel()
+        await #expect(throws: AgentError.self) { _ = try await second.turn() }
+        #expect(clock.now - start < .milliseconds(500))
+        #expect(try await first.turn().line == "first")
+    }
+}

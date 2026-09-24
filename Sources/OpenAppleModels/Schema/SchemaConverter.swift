@@ -2,10 +2,11 @@ import Foundation
 import FoundationModels
 
 /// Thrown when a JSON Schema cannot be expressed as a `GenerationSchema`.
-public struct SchemaConversionError: Error, Sendable, CustomStringConvertible {
+public struct SchemaConversionError: LocalizedError, Sendable, CustomStringConvertible {
     public var path: String
     public var message: String
     public var description: String { "Schema error at \(path): \(message)" }
+    public var errorDescription: String? { description }
 }
 
 /// Converts JSON Schema into FoundationModels `GenerationSchema` via
@@ -50,6 +51,13 @@ public struct SchemaConverter {
     private var dependencies: [DynamicGenerationSchema] = []
     private var referenceNames: [String: String] = [:]
     private var usedNames: Set<String> = []
+    /// Current nesting depth (objects, arrays, unions and `$ref` hops).
+    private var depth = 0
+    /// Refs currently being inlined, to detect cycles through non-object schemas.
+    private var inlining: Set<String> = []
+    /// Maximum nesting. Deep schemas are unusable for a small model anyway,
+    /// and unbounded recursion would overflow a concurrency thread's stack.
+    static let maxDepth = 32
     private(set) var warnings: [String] = []
 
     private init(root: JSONValue) { self.root = root }
@@ -65,6 +73,11 @@ public struct SchemaConverter {
     // MARK: Dispatch
 
     private mutating func build(_ node: JSONValue, name: String, path: String) throws(SchemaConversionError) -> Built {
+        depth += 1
+        defer { depth -= 1 }
+        guard depth <= Self.maxDepth else {
+            throw SchemaConversionError(path: path, message: "the schema nests or references more than \(Self.maxDepth) levels deep")
+        }
         guard case .object(let schema) = node else {
             if node == .bool(true) {
                 warn(path, "unconstrained schema `true` is generated as a string")
@@ -347,6 +360,10 @@ public struct SchemaConverter {
         let isNamed = target["properties"] != nil || target["type"]?.stringValue == "object"
             || target["anyOf"] != nil || target["oneOf"] != nil
         guard isNamed else {
+            guard inlining.insert(ref).inserted else {
+                throw SchemaConversionError(path: path, message: "recursive $ref '\(ref)' must point to an object or union schema")
+            }
+            defer { inlining.remove(ref) }
             let fallbackName = uniqueName(target["title"]?.stringValue ?? Self.lastComponent(of: ref))
             var built = try build(target, name: fallbackName, path: ref)
             if built.description == nil { built.description = description }

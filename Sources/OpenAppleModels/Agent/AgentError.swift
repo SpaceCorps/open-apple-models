@@ -115,3 +115,7 @@ public struct AgentError: Error, Sendable, CustomStringConvertible, Hashable {
         return AgentError(.generationFailed, text)
     }
 }
+
+extension AgentError: LocalizedError {
+    public var errorDescription: String? { message }
+}

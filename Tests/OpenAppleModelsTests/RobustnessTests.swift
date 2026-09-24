@@ -74,3 +74,48 @@ import Testing
         _ = try SchemaConverter.convert(schema, rootName: "Big")
     }
 }
+
+@Suite struct SchemaSafetyTests {
+    @Test(arguments: [
+        ##"{"$defs":{"A":{"$ref":"#/$defs/A"}},"type":"object","properties":{"a":{"$ref":"#/$defs/A"}}}"##,
+        ##"{"$defs":{"A":{"$ref":"#/$defs/B"},"B":{"$ref":"#/$defs/A"}},"type":"object","properties":{"a":{"$ref":"#/$defs/A"}}}"##,
+        ##"{"$defs":{"A":{"allOf":[{"$ref":"#/$defs/A"}]}},"type":"object","properties":{"a":{"$ref":"#/$defs/A"}}}"##,
+    ])
+    func cyclicRefsThrowInsteadOfOverflowing(_ text: String) throws {
+        #expect(throws: SchemaConversionError.self) { _ = try SchemaConverter.convert(try JSONSchema(parsing: text), rootName: "X") }
+    }
+
+    @Test func deepRefChainsAreBounded() throws {
+        var defs: [String] = []
+        for index in 0..<300 {
+            defs.append("\"N\(index)\":{\"type\":\"object\",\"properties\":{\"next\":{\"$ref\":\"#/$defs/N\(index + 1)\"}}}")
+        }
+        defs.append("\"N300\":{\"type\":\"string\"}")
+        let text = "{\"$defs\":{" + defs.joined(separator: ",") + "},\"type\":\"object\",\"properties\":{\"root\":{\"$ref\":\"#/$defs/N0\"}}}"
+        #expect(throws: SchemaConversionError.self) { _ = try SchemaConverter.convert(try JSONSchema(parsing: text), rootName: "X") }
+    }
+
+    @Test func errorsAreLocalized() {
+        let error: any Error = AgentError(.guardrailViolation, "Blocked by the guardrails.")
+        #expect(error.localizedDescription == "Blocked by the guardrails.")
+    }
+
+    @Test func cancellingARunningTurnWithAStubbornToolReturnsPromptly() async throws {
+        let stubborn = try AgentTool(name: "stubborn", description: "Blocks.") { _ in
+            await Task.detached { try? await Task.sleep(for: .milliseconds(1500)) }.value
+            return "late"
+        }
+        var configuration = AgentConfiguration()
+        configuration.toolTimeout = nil
+        let script = ModelScript([.toolCalls([.init(name: "stubborn")]), .text("never"), .text("second turn")])
+        let agent = try Agent(model: ScriptedLanguageModel(script), tools: [stubborn], configuration: configuration)
+        let run = agent.run("go")
+        Task { try? await Task.sleep(for: .milliseconds(150)); run.cancel() }
+        await #expect(throws: AgentError.self) { _ = try await run.response() }
+        // The next turn completes and is not erased when the old handler finishes.
+        let second = try await agent.respond(to: "again")
+        #expect(second.text.isEmpty == false)
+        try await Task.sleep(for: .milliseconds(1800))
+        #expect(agent.history.count == 2)
+    }
+}
