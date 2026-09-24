@@ -2,6 +2,39 @@ import Foundation
 import FoundationModels
 import Synchronization
 
+/// Automatic retries for transient model failures.
+///
+/// A turn is retried only if no tool was invoked during the failed attempt,
+/// so side-effecting tools never run twice. Guardrail violations, refusals,
+/// context overflow and cancellation are never retried unless opted in.
+public struct RetryPolicy: Sendable, Hashable {
+    /// Total attempts, including the first. `1` disables retries.
+    public var maxAttempts: Int
+    /// Delay before the first retry; doubles on each further retry.
+    public var initialDelay: Duration
+    /// Also retry guardrail violations (the model samples differently each
+    /// time, so a false positive may pass on retry).
+    public var retriesGuardrailViolations: Bool
+
+    public init(maxAttempts: Int = 2, initialDelay: Duration = .milliseconds(300), retriesGuardrailViolations: Bool = false) {
+        self.maxAttempts = max(1, maxAttempts)
+        self.initialDelay = initialDelay
+        self.retriesGuardrailViolations = retriesGuardrailViolations
+    }
+
+    public static let `default` = RetryPolicy()
+    public static let none = RetryPolicy(maxAttempts: 1)
+
+    func shouldRetry(_ error: AgentError) -> Bool {
+        switch error.code {
+        case .generationFailed: true
+        case .rateLimited: (error.retryAfter.map { $0.timeIntervalSinceNow < 5 } ?? true)
+        case .guardrailViolation: retriesGuardrailViolations
+        default: false
+        }
+    }
+}
+
 /// Settings for an ``Agent``.
 public struct AgentConfiguration: Sendable {
     /// Default tool policy for each turn (overridable per turn).
@@ -13,6 +46,8 @@ public struct AgentConfiguration: Sendable {
     public var sampling: GenerationOptions.SamplingMode?
     /// Time limit for local tools without their own timeout.
     public var toolTimeout: Duration?
+    /// Retries for transient model failures.
+    public var retry: RetryPolicy
 
     public init(
         toolPolicy: ToolPolicy = .default,
@@ -20,7 +55,8 @@ public struct AgentConfiguration: Sendable {
         temperature: Double? = nil,
         maximumResponseTokens: Int? = nil,
         sampling: GenerationOptions.SamplingMode? = nil,
-        toolTimeout: Duration? = .seconds(60)
+        toolTimeout: Duration? = .seconds(60),
+        retry: RetryPolicy = .default
     ) {
         self.toolPolicy = toolPolicy
         self.context = context
@@ -28,6 +64,7 @@ public struct AgentConfiguration: Sendable {
         self.maximumResponseTokens = maximumResponseTokens
         self.sampling = sampling
         self.toolTimeout = toolTimeout
+        self.retry = retry
     }
 
     var generationOptions: GenerationOptions {
@@ -358,31 +395,50 @@ public final class Agent: Sendable {
 
         let entriesBefore = session.transcript.count
         runtime.begin(turn)
-        controller.beginTurn(policy: turn.policy, context: configuration.context) { step in
-            turn.emit(.modelStep(step))
-        }
         defer {
             runtime.end()
             controller.endTurn()
         }
 
-        do {
-            let response: AgentResponse
-            switch format {
-            case .text:
-                response = try await streamText(session: session, prompt: prompt, options: configuration.generationOptions, turn: turn)
-            case .schema(let schema):
-                response = try await streamStructured(session: session, prompt: prompt, schema: schema, options: configuration.generationOptions, turn: turn)
+        var attempt = 1
+        var delay = configuration.retry.initialDelay
+        var emittedText = false
+        while true {
+            controller.beginTurn(policy: turn.policy, context: configuration.context) { step in
+                turn.emit(.modelStep(step))
             }
-            state.withLock { state in
-                state.usage.inputTokens += response.usage.inputTokens
-                state.usage.cachedInputTokens += response.usage.cachedInputTokens
-                state.usage.outputTokens += response.usage.outputTokens
+            do {
+                let response: AgentResponse
+                switch format {
+                case .text:
+                    response = try await streamText(
+                        session: session, prompt: prompt, options: configuration.generationOptions,
+                        turn: turn, resetFirst: emittedText, emitted: &emittedText)
+                case .schema(let schema):
+                    response = try await streamStructured(session: session, prompt: prompt, schema: schema, options: configuration.generationOptions, turn: turn)
+                }
+                state.withLock { state in
+                    state.usage.inputTokens += response.usage.inputTokens
+                    state.usage.cachedInputTokens += response.usage.cachedInputTokens
+                    state.usage.outputTokens += response.usage.outputTokens
+                }
+                turn.finish(with: .success(response))
+                return
+            } catch {
+                let failure = AgentError(error)
+                await Self.rollBack(session, to: entriesBefore)
+                let canRetry = attempt < configuration.retry.maxAttempts
+                    && configuration.retry.shouldRetry(failure)
+                    && turn.invokedToolCount == 0
+                    && !Task.isCancelled
+                guard canRetry else {
+                    turn.finish(with: .failure(failure))
+                    return
+                }
+                attempt += 1
+                try? await Task.sleep(for: delay)
+                delay *= 2
             }
-            turn.finish(with: .success(response))
-        } catch {
-            await Self.rollBack(session, to: entriesBefore)
-            turn.finish(with: .failure(AgentError(error)))
         }
     }
 
@@ -400,15 +456,30 @@ public final class Agent: Sendable {
         session.transcript = Transcript(entries: session.transcript.prefix(count))
     }
 
-    private func streamText(session: LanguageModelSession, prompt: Prompt, options: GenerationOptions, turn: TurnContext) async throws -> AgentResponse {
+    /// - Parameters:
+    ///   - resetFirst: The first text event must reset the host's text (a
+    ///     retried attempt replaces text streamed by the failed one).
+    ///   - emitted: Set to true once any text has been emitted.
+    private func streamText(
+        session: LanguageModelSession, prompt: Prompt, options: GenerationOptions,
+        turn: TurnContext, resetFirst: Bool, emitted: inout Bool
+    ) async throws -> AgentResponse {
         var text = ""
         var usage = TokenUsage()
+        var needsReset = resetFirst
         let stream = session.streamResponse(to: prompt, options: options)
         for try await snapshot in stream {
             let current = snapshot.content
-            if current.hasPrefix(text) {
+            if needsReset, !current.isEmpty {
+                turn.emit(.text(delta: current, text: current, isReset: true))
+                needsReset = false
+                emitted = true
+            } else if current.hasPrefix(text) {
                 let delta = String(current.dropFirst(text.count))
-                if !delta.isEmpty { turn.emit(.text(delta: delta, text: current, isReset: false)) }
+                if !delta.isEmpty {
+                    turn.emit(.text(delta: delta, text: current, isReset: false))
+                    emitted = true
+                }
             } else {
                 turn.emit(.text(delta: current, text: current, isReset: true))
             }

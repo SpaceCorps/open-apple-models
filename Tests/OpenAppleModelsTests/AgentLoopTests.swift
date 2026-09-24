@@ -229,7 +229,7 @@ final class Counter: Sendable {
         let script = ModelScript([.delayed(.seconds(5), .text("too late"))])
         let agent = try Agent(model: ScriptedLanguageModel(script))
         let run = agent.run("wait")
-        Task { try await Task.sleep(for: .milliseconds(100)); run.cancel() }
+        Task { try? await Task.sleep(for: .milliseconds(100)); run.cancel() }
         await #expect(throws: AgentError.self) { _ = try await run.response() }
         // The failed turn is rolled back.
         #expect(agent.history.isEmpty)

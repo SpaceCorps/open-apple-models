@@ -76,29 +76,6 @@ public struct AgentError: Error, Sendable, CustomStringConvertible, Hashable {
             @unknown default:
                 self.init(.generationFailed, String(describing: error))
             }
-        case let error as LanguageModelSession.GenerationError:
-            switch error {
-            case .exceededContextWindowSize(let context):
-                self.init(.contextSizeExceeded, context.debugDescription)
-            case .assetsUnavailable(let context):
-                self.init(.modelUnavailable, context.debugDescription)
-            case .guardrailViolation(let context):
-                self.init(.guardrailViolation, context.debugDescription)
-            case .unsupportedGuide(let context):
-                self.init(.invalidSchema, context.debugDescription)
-            case .unsupportedLanguageOrLocale(let context):
-                self.init(.unsupportedLanguage, context.debugDescription)
-            case .decodingFailure(let context):
-                self.init(.generationFailed, "Decoding failed: " + context.debugDescription)
-            case .rateLimited(let context):
-                self.init(.rateLimited, context.debugDescription)
-            case .concurrentRequests(let context):
-                self.init(.busy, context.debugDescription)
-            case .refusal(_, let context):
-                self.init(.refusal, context.debugDescription)
-            @unknown default:
-                self.init(.generationFailed, String(describing: error))
-            }
         case let error as LanguageModelSession.ToolCallError:
             if let inner = error.underlyingError as? AgentError {
                 self = inner
@@ -116,7 +93,25 @@ public struct AgentError: Error, Sendable, CustomStringConvertible, Hashable {
         case let error as SystemLanguageModel.Error:
             self.init(.modelUnavailable, error.debugDescription)
         default:
-            self.init(.generationFailed, String(describing: error))
+            self = Self.legacy(error) ?? AgentError(.generationFailed, String(describing: error))
         }
+    }
+
+    /// Maps the pre-27 `LanguageModelSession.GenerationError` (deprecated in
+    /// 27, where `LanguageModelError` replaces it) by name, so that errors from
+    /// older code paths are still classified without deprecation warnings.
+    private static func legacy(_ error: any Error) -> AgentError? {
+        guard String(reflecting: type(of: error)).hasSuffix("LanguageModelSession.GenerationError") else { return nil }
+        let text = String(describing: error)
+        let mapping: [(String, Code)] = [
+            ("exceededContextWindowSize", .contextSizeExceeded), ("assetsUnavailable", .modelUnavailable),
+            ("guardrailViolation", .guardrailViolation), ("unsupportedGuide", .invalidSchema),
+            ("unsupportedLanguageOrLocale", .unsupportedLanguage), ("rateLimited", .rateLimited),
+            ("concurrentRequests", .busy), ("refusal", .refusal), ("decodingFailure", .generationFailed),
+        ]
+        for (name, code) in mapping where text.hasPrefix(name) {
+            return AgentError(code, text)
+        }
+        return AgentError(.generationFailed, text)
     }
 }

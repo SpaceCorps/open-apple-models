@@ -60,6 +60,8 @@ final class TurnContext: Sendable {
     }
 
     var records: [ToolRecord] { state.withLock { $0.records } }
+    /// Tool invocations admitted so far (started, whether or not finished).
+    var invokedToolCount: Int { state.withLock { $0.callCount } }
     var steps: [ModelStep] { state.withLock { $0.steps } }
     var pendingCalls: [ToolCall] { state.withLock { $0.pending.values.map(\.call).sorted { $0.id < $1.id } } }
 
