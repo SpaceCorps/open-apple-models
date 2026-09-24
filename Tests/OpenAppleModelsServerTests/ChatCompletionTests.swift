@@ -214,7 +214,8 @@ import Testing
     }
 
     @Test func requestErrors() async throws {
-        let server = TestServers.make(ModelScript([]))
+        let script = ModelScript([])
+        let server = TestServers.make(script)
         Self.expectError(try await server.chat(#"{"model": "gpt-99", "messages": \#(Self.hi)}"#), status: 404, code: "model_not_found")
         Self.expectError(try await server.chat("{not json"), status: 400, code: "invalid_json")
         Self.expectError(try await server.chat("""
@@ -223,9 +224,15 @@ import Testing
         Self.expectError(try await server.chat("""
             {"messages": [{"role": "user", "content": "Hi"}, {"role": "tool", "tool_call_id": "call_x", "content": "?"}]}
             """), status: 400, code: "unknown_tool_call_id")
+        Self.expectError(try await server.chat("""
+            {"messages": [{"role": "user", "content": "Hi"},
+              {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}},
+                                                   {"id": "c2", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]},
+              {"role": "tool", "tool_call_id": "c1", "content": "sunny"}], "tools": [\(Fixtures.weatherTool)]}
+            """), status: 400, code: "missing_tool_output")
         Self.expectError(try await server.chat(#"{"messages": \#(Self.hi), "n": 3}"#), status: 400, code: "invalid_value")
         // Nothing reached the model.
-        #expect(true)
+        #expect(script.requests.isEmpty)
     }
 
     static func failing(_ error: any Error & Sendable) -> ModelScript { ModelScript([.fail(error)]) }

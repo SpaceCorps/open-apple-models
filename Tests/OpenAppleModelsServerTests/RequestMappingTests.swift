@@ -74,9 +74,55 @@ import Testing
         #expect(calls.map(\.id) == ["call_a", "call_b"])
         #expect(calls.map(\.toolName) == ["get_weather", "get_weather"])
         #expect(JSONValue(calls[0].arguments) == ["city": "Oslo"])
-        guard case .toolOutput(let output) = mapped.history[2] else { return }
-        #expect(output.id == "call_b")
-        #expect(output.toolName == "get_weather")
+        // Outputs are placed in call order, each with its call's id.
+        let outputs = mapped.history.compactMap { entry -> Transcript.ToolOutput? in
+            if case .toolOutput(let output) = entry { output } else { nil }
+        }
+        #expect(outputs.map(\.id) == ["call_a", "call_b"])
+        #expect(outputs.map(\.toolName) == ["get_weather", "get_weather"])
+        #expect(outputs.map { Agent.text(ofSegments: $0.segments) } == ["snow", "sunny"])
+    }
+
+    @Test func toolCallIDsArePairedStrictly() {
+        let call = { (id: String) in
+            #"{"id": "\#(id)", "type": "function", "function": {"name": "f", "arguments": "{}"}}"#
+        }
+        // Duplicate ids in one assistant message, or across the conversation.
+        Self.expectError("""
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "tool_calls": [\(call("c1")), \(call("c1"))]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"}]
+            """, code: "duplicate_tool_call_id", param: "messages[1].tool_calls[1].id")
+        Self.expectError("""
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "tool_calls": [\(call("c1"))]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"}, {"role": "user", "content": "again"},
+             {"role": "assistant", "tool_calls": [\(call("c1"))]}, {"role": "tool", "tool_call_id": "c1", "content": "y"}]
+            """, code: "duplicate_tool_call_id", param: "messages[4].tool_calls[0].id")
+        // Two tool messages for one call.
+        Self.expectError("""
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "tool_calls": [\(call("c1")), \(call("c2"))]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"}, {"role": "tool", "tool_call_id": "c1", "content": "y"}]
+            """, code: "duplicate_tool_output", param: "messages[3].tool_call_id")
+        // A late answer to a call that was already answered.
+        Self.expectError("""
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "tool_calls": [\(call("c1"))]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"}, {"role": "user", "content": "more"},
+             {"role": "tool", "tool_call_id": "c1", "content": "y"}]
+            """, code: "duplicate_tool_output", param: "messages[4].tool_call_id")
+        // Conversation ending before every call is answered.
+        Self.expectError("""
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "tool_calls": [\(call("c1")), \(call("c2"))]},
+             {"role": "tool", "tool_call_id": "c2", "content": "x"}]
+            """, code: "missing_tool_output")
+        // Empty ids and non-object arguments.
+        Self.expectError("""
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "tool_calls": [\(call(""))]},
+             {"role": "tool", "tool_call_id": "", "content": "x"}]
+            """, param: "messages[1].tool_calls[0].id")
+        Self.expectError("""
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "[1, 2]"}}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"}]
+            """, param: "messages[1].tool_calls[0].function.arguments")
     }
 
     @Test func emptyArgumentsBecomeAnEmptyObject() throws {

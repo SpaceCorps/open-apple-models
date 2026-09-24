@@ -74,11 +74,16 @@ public protocol BridgeExtension: Sendable {
     /// Built-in methods are registered first, so an extension may override them.
     func register(in registry: inout BridgeMethodRegistry, engine: BridgeEngine)
 
+    /// Notification methods the extension sends (e.g. `npc/event`), listed in
+    /// `initialize`'s `capabilities.notifications`. Defaults to none.
+    var notificationMethods: [String] { get }
+
     /// Cancels the extension's work. Called on `shutdown` and when the engine closes.
     func shutdown() async
 }
 
 extension BridgeExtension {
+    public var notificationMethods: [String] { [] }
     public func shutdown() async {}
 }
 

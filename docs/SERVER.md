@@ -137,7 +137,7 @@ Unknown paths return `404` with `code: "unknown_url"`. A wrong method returns `4
 | `user` content: a string or `text` and `image_url` parts | `Transcript.Prompt` segments. Images must be `data:` URLs and are decoded with ImageIO into image attachments (vision). Consecutive user messages are merged |
 | `assistant` content | `Transcript.Response` |
 | `assistant` `tool_calls` | `Transcript.ToolCalls` with the **client's ids**. `arguments` is parsed into `GeneratedContent` with key order kept |
-| `tool` messages | `Transcript.ToolOutput(id: tool_call_id, toolName:)`, with the name taken from the matching call |
+| `tool` messages | `Transcript.ToolOutput(id: tool_call_id, toolName:)`, with the name taken from the matching call. Outputs are placed in the order of the calls, whatever order the client sent them in |
 | Last message is `user` | That message becomes the prompt. Everything before it becomes history |
 | Last message is `tool` | Generation continues after the tool output with an **empty prompt**, which works reliably on-device |
 | `tools` | `AgentTool.external(...)` plus the configured server tools |
@@ -148,6 +148,16 @@ Unknown paths return `404` with `code: "unknown_url"`. A wrong method returns `4
 | `stop` (a string or up to 4 strings) | Applied by the server. Text is held back until it cannot be the start of a stop sequence. Generation is cancelled at the first match |
 | `response_format: json_schema` | Constrained generation through the core's JSON Schema → `GenerationSchema` converter. `strict` is accepted. Output keys follow schema order |
 | `response_format: json_object` | Best effort: the model is instructed to answer with a JSON object, then the output is validated. Code fences and surrounding prose are stripped. On failure: 500 `invalid_json_output` |
+
+Tool calls in the history are validated strictly, because on-device inference pairs each
+tool output with its call by id: a `ToolOutput` whose id differs from its call's id makes
+inference fail ("Unable to tokenize prompt"), and a call without an output makes `fm serve`
+produce garbage. So every `tool_calls` id must be non-empty and unique in the conversation,
+and every call must be answered by exactly one `tool` message placed directly after the
+assistant message that made it. Anything else is rejected with 400 before the model runs
+(`missing_tool_output`, `unknown_tool_call_id`, `duplicate_tool_call_id`,
+`duplicate_tool_output`). Client-chosen ids of any shape (`c1`, `call_…`) work, and a
+follow-up request may omit `tools` (verified live).
 
 When the model calls a client tool, the server waits for a short debounce window (40 ms by
 default) to collect parallel calls. It then cancels the turn and returns the calls in the
@@ -191,7 +201,7 @@ Every error uses OpenAI's envelope, `{"error": {"message", "type", "param", "cod
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `invalid_json`, `invalid_value`, `invalid_type`, `missing_required_parameter`, `invalid_last_message`, `unknown_tool_call_id`, `missing_tool_output`, `unknown_tool`, `invalid_schema`, `unsupported_image_url`, `invalid_image`, `malformed_request` | Invalid requests. `param` names the field, for example `messages[2].tool_call_id` |
+| 400 | `invalid_json`, `invalid_value`, `invalid_type`, `missing_required_parameter`, `invalid_last_message`, `unknown_tool_call_id`, `missing_tool_output`, `duplicate_tool_call_id`, `duplicate_tool_output`, `unknown_tool`, `invalid_schema`, `unsupported_image_url`, `invalid_image`, `malformed_request` | Invalid requests. `param` names the field, for example `messages[2].tool_call_id` |
 | 400 | `context_length_exceeded` | The conversation does not fit the 8192-token context |
 | 400 | `content_filter` | The on-device safety guardrails blocked the input or output |
 | 401 | `invalid_api_key` | `apiKey` is set and the Bearer token is missing or wrong |
@@ -264,11 +274,15 @@ The server implements HTTP/1.1 itself on Network.framework:
 
 | Request | Latency |
 |---|---|
-| Tool-call response (`tool_choice: "required"`) | 0.57–0.6 s |
-| Answer after the tool result | 0.7–0.9 s (about 99% of the prompt served from the prefix cache: `cached_tokens: 193/194`) |
-| `json_schema` structured reply | about 1.0 s |
+| Tool-call response (`tool_choice: "required"`) | 0.6–1.0 s warm. The first request after launch took 4.5 s (model load) |
+| Two parallel tool calls in one response | about 1.0 s |
+| Answer after the tool result | 0.7–1.3 s (about 99% of the prompt served from the prefix cache: `cached_tokens: 193/194`) |
+| `json_schema` structured reply | 1.0–1.2 s |
+| Image (`data:` PNG) question | about 1.9 s |
 | Streaming | first chunk at about 0.43 s |
 | Three concurrent short requests | all finished within 0.55 s |
+
+Latency depends on what else is using the on-device model at the time.
 
 ## Limitations
 

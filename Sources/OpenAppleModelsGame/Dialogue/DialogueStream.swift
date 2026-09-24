@@ -31,9 +31,6 @@ public final class DialogueStream: AsyncSequence, Sendable {
     private struct State {
         var run: AgentRun?
         var cancelled = false
-        var finished = false
-        /// External calls announced to the consumer and not yet answered.
-        var awaiting: Set<String> = []
     }
 
     private let state = Mutex(State())
@@ -48,22 +45,10 @@ public final class DialogueStream: AsyncSequence, Sendable {
     /// ``DialogueEvent/externalToolCall(_:)``. Returns false if no such call is pending.
     @discardableResult
     public func submit(_ output: ToolOutput, for callID: String) -> Bool {
-        let (run, awaiting) = state.withLock { state in
-            (state.run, state.awaiting.remove(callID) != nil)
-        }
-        guard let run else { return false }
-        if run.submit(output, for: callID) { return true }
-        guard awaiting else { return false }
-        // The agent announces an external call an instant before it starts
-        // waiting for the output; a very fast host can answer in between.
-        // Deliver as soon as the call is registered.
-        Task {
-            for _ in 0..<1000 {
-                try? await Task.sleep(for: .milliseconds(1))
-                if run.submit(output, for: callID) || self.isFinished { return }
-            }
-        }
-        return true
+        // The agent registers an external call before announcing it, so an
+        // answer sent from the announcement can never arrive too early.
+        guard let run = state.withLock({ $0.run }) else { return false }
+        return run.submit(output, for: callID)
     }
 
     /// External tool calls waiting for output.
@@ -82,8 +67,6 @@ public final class DialogueStream: AsyncSequence, Sendable {
     }
 
     public var isCancelled: Bool { state.withLock { $0.cancelled } }
-
-    private var isFinished: Bool { state.withLock { $0.finished } }
 
     /// Consumes the events and returns the finished turn.
     ///
@@ -131,22 +114,15 @@ public final class DialogueStream: AsyncSequence, Sendable {
     }
 
     func emit(_ event: DialogueEvent) {
-        switch event {
-        case .externalToolCall(let call): state.withLock { _ = $0.awaiting.insert(call.id) }
-        case .toolResult(let record): state.withLock { _ = $0.awaiting.remove(record.call.id) }
-        default: break
-        }
         continuation.yield(event)
     }
 
     func finish(_ turn: DialogueTurn) {
-        state.withLock { $0.finished = true }
         continuation.yield(.completed(turn))
         continuation.finish()
     }
 
     func fail(_ error: AgentError) {
-        state.withLock { $0.finished = true }
         continuation.finish(throwing: error)
     }
 }

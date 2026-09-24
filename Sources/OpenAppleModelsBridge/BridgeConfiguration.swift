@@ -121,7 +121,8 @@ public struct BridgeConfiguration: Sendable {
     /// Receives diagnostic messages (unknown response ids, dropped messages…).
     public var logger: (@Sendable (BridgeLogLevel, String) -> Void)?
 
-    /// Additional method sets (e.g. game methods) registered at start-up.
+    /// Method sets registered at start-up, after the built-in methods.
+    /// Defaults to ``standardExtensions()``; pass `[]` for the built-ins only.
     public var extensions: [any BridgeExtension]
 
     /// Called once after the response to `shutdown` has been delivered
@@ -135,7 +136,7 @@ public struct BridgeConfiguration: Sendable {
         allowsScriptedModels: Bool = true,
         defaultToolTimeout: Duration? = .seconds(120),
         logger: (@Sendable (BridgeLogLevel, String) -> Void)? = nil,
-        extensions: [any BridgeExtension] = [],
+        extensions: [any BridgeExtension] = BridgeConfiguration.standardExtensions(),
         onShutdown: (@Sendable () -> Void)? = nil
     ) {
         self.modelFactory = modelFactory
@@ -146,6 +147,18 @@ public struct BridgeConfiguration: Sendable {
         self.logger = logger
         self.extensions = extensions
         self.onShutdown = onShutdown
+    }
+
+    /// The extensions every transport serves by default (the `oam stdio` CLI
+    /// and the C ABI both use the default configuration). Returns fresh
+    /// instances on each call, since each engine owns its extensions' state.
+    ///
+    /// Currently ``GameExtension`` (`npc/*`, `decision/*`, `world/*`,
+    /// `content/generate`). To ship a new method set with every transport,
+    /// implement it as a ``BridgeExtension`` in this module and add an
+    /// instance here.
+    public static func standardExtensions() -> [any BridgeExtension] {
+        [GameExtension()]
     }
 
     /// The default ``modelFactory``.

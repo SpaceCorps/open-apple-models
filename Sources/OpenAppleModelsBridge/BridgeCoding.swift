@@ -140,6 +140,42 @@ public enum BridgeCoding {
         }
     }
 
+    /// The instructions and tool definitions saved in a transcript's leading
+    /// instructions entry.
+    public struct SavedSetup: Sendable {
+        /// The instruction text, or `nil` when the transcript had none.
+        public var instructions: String?
+        /// The tool definitions the model saw.
+        public var tools: [Transcript.ToolDefinition]
+    }
+
+    /// Reads the instructions entry at the start of a saved transcript.
+    /// Returns `nil` when the transcript does not start with one.
+    public static func savedSetup(of transcript: Transcript) -> SavedSetup? {
+        guard case .instructions(let entry)? = transcript.first else { return nil }
+        let text = BridgeScript.text(of: entry.segments)
+        return SavedSetup(instructions: text.isEmpty ? nil : text, tools: entry.toolDefinitions)
+    }
+
+    /// Recreates client-executed tools from definitions saved in a transcript
+    /// (their argument schemas are converted back to JSON Schema). Definitions
+    /// that cannot be restored are skipped with a warning.
+    public static func clientTools(restoring definitions: [Transcript.ToolDefinition], defaultTimeout: Duration?) -> (tools: [AgentTool], warnings: [String]) {
+        var tools: [AgentTool] = []
+        var warnings: [String] = []
+        var names: Set<String> = []
+        for definition in definitions where names.insert(definition.name).inserted {
+            do {
+                let parameters = try JSONSchema(definition.parameters)
+                tools.append(try AgentTool.external(
+                    name: definition.name, description: definition.description, parameters: parameters, timeout: defaultTimeout))
+            } catch {
+                warnings.append("\(definition.name): could not be restored from 'history' (\(error)); send its definition in 'tools'.")
+            }
+        }
+        return (tools, warnings)
+    }
+
     /// `"auto" | "none" | "required" | {"tool": name}` (a bare tool name is
     /// not accepted, so typos are caught).
     public static func toolChoice(_ value: JSONValue, path: String = "toolChoice") throws(BridgeError) -> ToolChoice {

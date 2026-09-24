@@ -9,7 +9,8 @@ What it shows:
   2. a session whose tools run in Python (the model decides, the host executes),
   3. streaming text, a forced first tool call, and a structured decision,
   4. a tool error the model recovers from,
-  5. saving the transcript and restoring it into a new session.
+  5. saving the transcript and restoring it into a new session,
+  6. game methods: an NPC with a persona, world state and a grounding tool; a decision; a save state.
 """
 
 import asyncio
@@ -96,6 +97,45 @@ async def main() -> None:
         again = await bridge.create_session(INSTRUCTIONS, tools=["check_inventory"], model=restored_model, history=saved)
         reply = await again.respond("What did I first ask you about?", toolChoice="none")
         print("\nRestored Gorm:", reply["text"])
+
+        # -- 6. game methods: an NPC, a decision, a save ------------------------------------------
+        world = await bridge.create_world({"player": {"name": "Aria", "gold": 60}}, world="village")
+        npc_model = "system" if LIVE else scripted(
+            {"toolCalls": [{"name": "check_inventory", "arguments": {"item": "iron sword"}}]},
+            {"json": {"emotion": "proud", "line": "Three iron swords, 45 gold each, lass.",
+                      "player_options": ["Buy one.", "Too pricey."], "ends_conversation": False}},
+            {"toolCalls": [{"name": "check_inventory", "arguments": {"item": "shield"}}]},
+            {"json": {"emotion": "annoyed", "line": "Out of shields. Come back next week.",
+                      "player_options": ["Fine."], "ends_conversation": False}},
+        )
+        smith = await bridge.create_npc(
+            {"name": "Gorm", "role": "the village blacksmith", "personality": "Gruff but fair.",
+             "speakingStyle": "Short, blunt sentences."},
+            tools=["check_inventory"], world=world.id, model=npc_model, npc="gorm",
+            options={"groundingTool": "check_inventory", "worldReadable": [], "worldContextPaths": ["player"]})
+        def show(event):  # typewriter: append deltas, replace on reset
+            if event["type"] == "lineDelta":
+                print(event["delta"], end="", flush=True)
+            elif event["type"] == "lineReset":
+                print("\n        " + event["line"], end="", flush=True)
+
+        for line in ("Do you have iron swords?", "What about a shield?"):
+            print("\nPlayer:", line)
+            print("Gorm:   ", end="", flush=True)
+            turn = await smith.talk(line, on_event=show)
+            print("\n   [{}] options: {} | tools: {} | fallback: {}".format(
+                turn["emotion"], turn["playerOptions"], [r["call"]["arguments"] for r in turn["toolCalls"]],
+                turn["isFallback"]))
+
+        decision = await bridge.decide(
+            "Aria, a regular customer, asks for a discount on an iron sword.",
+            [{"id": "discount", "description": "Knock 5 gold off"}, {"id": "refuse", "description": "Hold the price"}],
+            actor="gorm", fallback="refuse",
+            **({} if LIVE else {"model": scripted({"json": {"reasoning": "Aria is a regular.", "choice": "discount",
+                                                            "confidence": 70}})}))
+        print("\nGorm decides:", decision["optionID"], "-", decision["reasoning"])
+        save = await smith.state()
+        print("NPC save state:", len(json.dumps(save)), "bytes;", "relationship", save["memory"]["relationship"])
 
         # -- errors are typed ------------------------------------------------------------------
         try:

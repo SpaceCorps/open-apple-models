@@ -72,8 +72,9 @@ typedef struct oam_bridge oam_bridge;
 
 /*
  * Receives every outgoing message: responses to your requests, notifications
- * (session/event, tool/cancel) and requests from the bridge (tool/call, which
- * you must answer with a JSON-RPC response via oam_bridge_send()).
+ * (session/event, npc/event, world/changed, tool/cancel) and requests from the
+ * bridge (tool/call, which you must answer with a JSON-RPC response via
+ * oam_bridge_send()).
  *
  * json_line: one line of UTF-8 JSON, valid only during the call.
  * user_data: the pointer given to oam_bridge_create().

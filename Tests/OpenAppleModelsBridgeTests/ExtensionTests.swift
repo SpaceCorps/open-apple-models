@@ -40,6 +40,8 @@ final class EchoExtension: BridgeExtension {
         registry.register("ping") { _ in .result(["pong": true]) }
     }
 
+    var notificationMethods: [String] { ["echo/event"] }
+
     func shutdown() async {
         shutDown.withLock { $0 = true }
     }
@@ -73,6 +75,7 @@ struct ExtensionTests {
         let initialize = try await harness.result("initialize")
         let methods = initialize["capabilities"]?["methods"]?.arrayValue ?? []
         #expect(methods.contains("echo/say"))
+        #expect(initialize["capabilities"]?["notifications"] == ["session/event", "tool/cancel", "echo/event"])
         #expect(try await harness.result("ping") == ["pong": true])
 
         let custom = try await harness.call("echo/say", ["npc": "nobody", "text": "hi"])

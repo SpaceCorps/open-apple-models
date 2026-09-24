@@ -5,9 +5,11 @@
 """
 
 import asyncio
+import gc
 import time
 import unittest
 
+import open_apple_models
 from open_apple_models import Bridge, BridgeError, ToolError
 
 GATE = {"type": "object", "properties": {"gate": {"type": "string"}}, "required": ["gate"]}
@@ -145,6 +147,119 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.name, "shut_down")
         with self.assertRaises(BridgeError):
             bridge.notify("ping")
+
+    async def test_unclosed_bridge_stays_alive_until_closed(self):
+        bridge = Bridge()
+        await bridge.__aenter__()
+        session = await bridge.create_session(model=scripted({"text": "late", "delayMs": 100}))
+        # A response nobody waits for arrives after the last Python reference is gone.
+        bridge.send_message({"jsonrpc": "2.0", "id": "orphan", "method": "session/respond",
+                             "params": {"session": session.id, "prompt": "x"}})
+        key = id(bridge)
+        del bridge, session
+        gc.collect()
+        await asyncio.sleep(0.3)  # the callback fires into the still-registered bridge
+        survivor = open_apple_models._live_bridges.get(key)
+        self.assertIsNotNone(survivor)
+        survivor.close()
+        self.assertNotIn(key, open_apple_models._live_bridges)
+        survivor.close()  # idempotent
+
+
+def reply(line, emotion="neutral", options=("Buy one.", "Goodbye.")):
+    """A structured NPC reply step for the scripted model."""
+    return {"json": {"emotion": emotion, "line": line, "player_options": list(options), "ends_conversation": False}}
+
+
+class GameTests(unittest.IsolatedAsyncioTestCase):
+    async def test_npc_talk_with_client_tool_and_streaming(self):
+        async with Bridge() as bridge:
+            calls = []
+
+            @bridge.tool("check_inventory", "Look up stock of an item.",
+                         {"type": "object", "properties": {"item": {"type": "string"}}, "required": ["item"]})
+            def check_inventory(args, context):
+                calls.append((args["item"], context.npc))
+                return {"stock": 3, "price_gold": 45}
+
+            world = await bridge.create_world({"player": {"name": "Aria", "gold": 60}}, world="village")
+            gorm = await bridge.create_npc(
+                {"name": "Gorm", "role": "the village blacksmith"}, tools=["check_inventory"], world=world.id,
+                options={"groundingTool": "check_inventory", "worldReadable": []}, npc="gorm",
+                model=scripted({"toolCalls": [{"name": "check_inventory", "arguments": {"item": "iron sword"}}]},
+                               reply("Three swords, lad.", "proud"), {"text": "Mind the forge."}))
+            self.assertEqual(gorm.tools, ["check_inventory"])
+            lines, emotions = [], []
+            turn = await gorm.talk("Swords?", context="The shop is busy.", on_line=lines.append, on_emotion=emotions.append)
+            self.assertEqual(turn["line"], "Three swords, lad.")
+            self.assertEqual(turn["emotion"], "proud")
+            self.assertEqual(turn["playerOptions"], ["Buy one.", "Goodbye."])
+            self.assertEqual(lines[-1], turn["line"])
+            self.assertEqual(emotions, ["proud"])
+            self.assertEqual(calls, [("iron sword", "gorm")])
+            self.assertEqual(turn["toolCalls"][0]["output"], {"stock": 3, "price_gold": 45})
+            self.assertEqual(await gorm.bark("Night falls."), "Mind the forge.")
+            npcs = await bridge.list_npcs()
+            self.assertEqual([(entry["npc"], entry["turnCount"], entry["world"]) for entry in npcs], [("gorm", 1, "village")])
+
+    async def test_npc_save_update_and_restore(self):
+        async with Bridge() as bridge:
+            gorm = await bridge.create_npc({"name": "Gorm"}, options={"replyFormat": "text"},
+                                           model=scripted({"text": "[happy] Welcome!"}))
+            self.assertEqual((await gorm.talk("Hi"))["emotion"], "happy")
+            self.assertEqual(await gorm.update(memory={"relationship": 30}, persona={"role": "a smith"}), [])
+            state = await gorm.state()
+            self.assertEqual(state["memory"]["relationship"], 30)
+            self.assertEqual(state["persona"]["role"], "a smith")
+            self.assertEqual(state["options"]["replyFormat"], "text")
+            await gorm.delete()
+            restored = await bridge.restore_npc(state, model=scripted({"text": "[sad] Back again."}))
+            self.assertEqual(restored.id, gorm.id)
+            turn = await restored.talk("Hello again")
+            self.assertEqual((turn["line"], turn["relationship"]), ("Back again.", 30))
+            with self.assertRaises(BridgeError) as caught:
+                await bridge.npc("nobody").talk("hi")
+            self.assertEqual(caught.exception.name, "npc_not_found")
+
+    async def test_decisions_and_content(self):
+        async with Bridge() as bridge:
+            decision = await bridge.decide(
+                "The goblin has 3 HP left.", ["attack", {"id": "flee", "description": "Run away"}],
+                actor={"name": "Snik", "personality": "Timid."}, context={"hp": 3},
+                model=scripted({"json": {"reasoning": "Timid.", "choice": "flee", "confidence": 80}}))
+            self.assertEqual((decision["optionID"], decision["confidence"], decision["isFallback"]), ("flee", 80, False))
+            results = await bridge.decide_many(
+                [{"situation": "A", "options": ["x", "y"]}, {"situation": "B", "options": ["x", "y"], "fallbackOptionID": "y"}],
+                max_concurrency=1,
+                model=scripted({"json": {"reasoning": "-", "choice": "x", "confidence": 50}}, {"error": "guardrail_violation"}))
+            self.assertEqual([r["optionID"] for r in results], ["x", "y"])
+            self.assertTrue(results[1]["isFallback"])
+            item = await bridge.generate(
+                "A cursed sword.",
+                {"type": "object", "properties": {"name": {"type": "string"}, "damage": {"type": "integer"}},
+                 "required": ["name", "damage"]},
+                model=scripted({"json": {"damage": 45, "name": "Drowned Fang"}}))
+            self.assertEqual(list(item.items()), [("name", "Drowned Fang"), ("damage", 45)])
+
+    async def test_world_state_and_subscriptions(self):
+        async with Bridge() as bridge:
+            world = await bridge.create_world({"player": {"gold": 60}})
+            changes = []
+            subscription = await world.subscribe(changes.append, path="player")
+            self.assertEqual(await world.set("player.gold", 45), 1)
+            self.assertEqual(await world.get("player.gold"), 45)
+            self.assertIsNone(await world.get("player.horse"))
+            await world.merge({"quests": {"ring": "started"}})
+            self.assertEqual(await world.remove("player.gold"), 45)
+            self.assertEqual(await world.snapshot(), {"player": {}, "quests": {"ring": "started"}})
+            await asyncio.sleep(0.05)
+            self.assertEqual([(c["path"], c.get("oldValue"), c.get("newValue")) for c in changes],
+                             [("player.gold", 60, 45), ("player.gold", 45, None)])
+            await world.unsubscribe(subscription)
+            await world.delete()
+            with self.assertRaises(BridgeError) as caught:
+                await world.get("player")
+            self.assertEqual(caught.exception.name, "world_not_found")
 
 
 if __name__ == "__main__":

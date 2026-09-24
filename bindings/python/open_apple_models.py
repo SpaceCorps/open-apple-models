@@ -22,6 +22,16 @@ calls executed by your code::
 
     asyncio.run(main())
 
+Game methods (NPCs, decisions, world state, content) have their own helpers::
+
+    world = await bridge.create_world({"player": {"name": "Aria", "gold": 60}}, world="village")
+    gorm = await bridge.create_npc({"name": "Gorm", "role": "the village blacksmith"},
+                                   tools=["check_inventory"], world=world.id,
+                                   options={"groundingTool": "check_inventory"})
+    turn = await gorm.talk("Got any iron swords?", on_line=print)  # the line so far, as it streams
+    print(turn["emotion"], turn["playerOptions"])
+    decision = await bridge.decide("The goblin has 3 HP left.", ["attack", "flee", "beg"], actor="gorm")
+
 The library is located via, in order: the ``library`` argument, the
 ``OAM_LIBRARY`` environment variable, the repository's ``.build/release`` and
 ``.build/debug`` folders, then the system search path. Build it with
@@ -31,6 +41,7 @@ Requires Python 3.9+. Protocol reference: docs/PROTOCOL.md.
 """
 
 import asyncio
+import atexit
 import ctypes
 import ctypes.util
 import inspect
@@ -40,9 +51,13 @@ import os
 import threading
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Union
 
-__all__ = ["Bridge", "BridgeError", "Session", "ToolError", "ToolContext", "find_library", "load_library"]
+__all__ = ["Bridge", "BridgeError", "NPC", "Session", "ToolError", "ToolContext", "World",
+           "find_library", "load_library"]
 
 _CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
+
+# Distinguishes "not passed" from an explicit None (which is sent as JSON null).
+_UNSET: Any = object()
 
 
 # --------------------------------------------------------------------------------------------
@@ -72,6 +87,22 @@ def find_library(path: Optional[str] = None) -> str:
 
 _libraries: Dict[str, ctypes.CDLL] = {}
 _libraries_lock = threading.Lock()
+
+# Bridges not yet closed. The native side holds a raw pointer to each bridge's
+# ctypes callback, so an open Bridge must never be garbage collected: keep it
+# here until close(), and destroy leftovers before the interpreter shuts down.
+_live_bridges: Dict[int, "Bridge"] = {}
+_live_lock = threading.Lock()
+
+
+def _close_all_bridges() -> None:
+    with _live_lock:
+        bridges = list(_live_bridges.values())
+    for bridge in bridges:
+        bridge._destroy_native()
+
+
+atexit.register(_close_all_bridges)
 
 
 def load_library(path: Optional[str] = None) -> ctypes.CDLL:
@@ -134,11 +165,13 @@ class ToolContext:
         self.name: str = call.get("name", "")
         self.arguments: Dict[str, Any] = call.get("arguments") or {}
         self.session: Optional[str] = params.get("session")
+        self.npc: Optional[str] = params.get("npc")
         self.request_id: Any = params.get("requestId")
         self.params = params
 
     def __repr__(self) -> str:
-        return "ToolContext(name={!r}, session={!r}, call_id={!r})".format(self.name, self.session, self.call_id)
+        return "ToolContext(name={!r}, session={!r}, npc={!r}, call_id={!r})".format(
+            self.name, self.session, self.npc, self.call_id)
 
 
 ToolHandler = Callable[..., Union[Any, Awaitable[Any]]]
@@ -175,6 +208,9 @@ class Bridge:
     Messages from the bridge arrive on a background thread and are handed to the
     loop with ``call_soon_threadsafe``; every future, event handler and tool
     handler runs on the loop's thread.
+
+    Always :meth:`close` the bridge (or use it as a context manager). An unclosed
+    bridge stays alive until the interpreter exits, when it is destroyed.
     """
 
     def __init__(self, library: Optional[str] = None, loop: Optional[asyncio.AbstractEventLoop] = None):
@@ -186,12 +222,15 @@ class Bridge:
         self._notification_handlers: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
         self._tools: Dict[str, _Tool] = {}
         self._tool_tasks: Dict[str, "asyncio.Task[None]"] = {}
+        self._world_handlers: Dict[str, Callable[[Dict[str, Any]], None]] = {}
         self._closed = False
         self._callback = _CALLBACK(self._on_message)  # keep a reference for the bridge's lifetime
         handle = self._lib.oam_bridge_create(self._callback, None)
         if not handle:
             raise OSError("oam_bridge_create failed")
         self._handle = ctypes.c_void_p(handle)
+        with _live_lock:
+            _live_bridges[id(self)] = self
 
     # ---- lifecycle ---------------------------------------------------------------------------
 
@@ -200,18 +239,34 @@ class Bridge:
         return self._lib.oam_version().decode()
 
     def close(self) -> None:
-        """Destroys the bridge: cancels running turns; no messages arrive afterwards."""
-        if self._closed:
+        """Destroys the bridge: cancels running turns; no messages arrive afterwards.
+        Pending requests fail with ``shut_down``."""
+        if not self._destroy_native():
             return
-        self._closed = True
-        self._lib.oam_bridge_destroy(self._handle)
         error = BridgeError(-32023, "The bridge was closed.", {"code": "shut_down"})
         for future in list(self._pending.values()):
             if not future.done():
-                future.set_exception(error)
+                try:
+                    future.set_exception(error)
+                except RuntimeError:  # the event loop is already closed
+                    pass
         self._pending.clear()
         for task in list(self._tool_tasks.values()):
-            task.cancel()
+            try:
+                task.cancel()
+            except RuntimeError:
+                pass
+
+    def _destroy_native(self) -> bool:
+        """Destroys the native bridge once; returns False if it was already destroyed."""
+        with _live_lock:
+            if self._closed:
+                return False
+            self._closed = True
+            _live_bridges.pop(id(self), None)
+        # Waits for an in-flight callback; ctypes releases the GIL during the call.
+        self._lib.oam_bridge_destroy(self._handle)
+        return True
 
     async def __aenter__(self) -> "Bridge":
         self._bind_loop()
@@ -315,6 +370,10 @@ class Bridge:
                       handler: ToolHandler, timeout: Optional[float] = None) -> None:
         self._tools[name] = _Tool(name, description, parameters, handler, timeout)
 
+    def _tool_list(self, tools: Iterable[Union[str, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """Registered tool names become their definitions; dicts pass through."""
+        return [self.tool_definitions([tool])[0] if isinstance(tool, str) else tool for tool in tools]
+
     def tool_definitions(self, names: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
         """Definitions for ``session/create``'s ``tools`` (all registered tools by default)."""
         selected = list(names) if names is not None else list(self._tools)
@@ -341,7 +400,7 @@ class Bridge:
         if instructions is not None:
             params["instructions"] = instructions
         if tools is not None:
-            params["tools"] = [self.tool_definitions([tool])[0] if isinstance(tool, str) else tool for tool in tools]
+            params["tools"] = self._tool_list(tools)
         if options is not None:
             params["options"] = options
         if model is not None:
@@ -350,6 +409,141 @@ class Bridge:
             params["history"] = history
         result = await self.request("session/create", params)
         return Session(self, result["session"], result.get("warnings", []))
+
+
+    # ---- NPCs (docs/PROTOCOL.md section 6) ---------------------------------------------------
+
+    async def create_npc(self, persona: Dict[str, Any],
+                         tools: Optional[Iterable[Union[str, Dict[str, Any]]]] = None,
+                         world: Optional[str] = None, options: Optional[Dict[str, Any]] = None,
+                         memory: Optional[Dict[str, Any]] = None, model: Any = None,
+                         npc: Optional[str] = None) -> "NPC":
+        """Creates an NPC. ``persona`` needs at least ``name``; ``tools`` lists registered
+        tool names or raw definitions; ``world`` is a world id; ``options`` are NPC options
+        such as ``{"groundingTool": "check_inventory", "replyFormat": "text"}``."""
+        params: Dict[str, Any] = {"persona": persona}
+        if npc is not None:
+            params["npc"] = npc
+        if tools is not None:
+            params["tools"] = self._tool_list(tools)
+        if world is not None:
+            params["world"] = world
+        if options is not None:
+            params["options"] = options
+        if memory is not None:
+            params["memory"] = memory
+        if model is not None:
+            params["model"] = model
+        result = await self.request("npc/create", params)
+        return NPC(self, result["npc"], result.get("tools", []), result.get("warnings", []))
+
+    async def restore_npc(self, state: Dict[str, Any], npc: Optional[str] = None,
+                          tools: Any = _UNSET, options: Any = _UNSET, world: Any = _UNSET,
+                          model: Any = None) -> "NPC":
+        """Rebuilds an NPC from :meth:`NPC.state`. Tools, options and world default to the
+        saved ones; pass them (even ``None``) to override. The model is not saved."""
+        params: Dict[str, Any] = {"state": state}
+        if npc is not None:
+            params["npc"] = npc
+        if tools is not _UNSET:
+            params["tools"] = None if tools is None else self._tool_list(tools)
+        if options is not _UNSET:
+            params["options"] = options
+        if world is not _UNSET:
+            params["world"] = world
+        if model is not None:
+            params["model"] = model
+        result = await self.request("npc/restore", params)
+        return NPC(self, result["npc"], result.get("tools", []), result.get("warnings", []))
+
+    def npc(self, npc_id: str) -> "NPC":
+        """A handle for an existing NPC (no request is sent)."""
+        return NPC(self, npc_id, [], [])
+
+    async def list_npcs(self) -> List[Dict[str, Any]]:
+        return (await self.request("npc/list"))["npcs"]
+
+    # ---- decisions and content ---------------------------------------------------------------
+
+    async def decide(self, situation: Any, options: Iterable[Union[str, Dict[str, Any]]],
+                     actor: Any = None, context: Any = None,
+                     tools: Optional[Iterable[Union[str, Dict[str, Any]]]] = None,
+                     tool_choice: Any = None, fallback: Optional[str] = None,
+                     **settings: Any) -> Dict[str, Any]:
+        """Picks one option id (``result["optionID"]``). ``options`` are id strings or
+        ``{"id", "description"}`` dicts; ``actor`` is a persona dict or an NPC id;
+        ``fallback`` is returned (``isFallback``) when guardrails block the decision.
+        ``settings``: ``instructions``, ``temperature``, ``maxToolRounds``,
+        ``toolTimeoutSeconds``, ``model``."""
+        params = self._decision_params(situation, options, actor, context, tools, tool_choice, fallback)
+        params.update(settings)
+        return await self.request("decision/decide", params)
+
+    async def decide_many(self, requests: Iterable[Dict[str, Any]], max_concurrency: Optional[int] = None,
+                          **settings: Any) -> List[Dict[str, Any]]:
+        """Several independent decisions (raw ``decision/decide`` params each). Returns one
+        entry per request, in order: a decision, or ``{"error": {...}}``."""
+        prepared = []
+        for request in requests:
+            request = dict(request)
+            if "tools" in request and request["tools"] is not None:
+                request["tools"] = self._tool_list(request["tools"])
+            prepared.append(request)
+        params: Dict[str, Any] = {"requests": prepared}
+        if max_concurrency is not None:
+            params["maxConcurrency"] = max_concurrency
+        params.update(settings)
+        return (await self.request("decision/decideMany", params))["results"]
+
+    def _decision_params(self, situation: Any, options: Iterable[Union[str, Dict[str, Any]]], actor: Any,
+                         context: Any, tools: Optional[Iterable[Union[str, Dict[str, Any]]]],
+                         tool_choice: Any, fallback: Optional[str]) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"situation": situation, "options": list(options)}
+        if actor is not None:
+            params["actor"] = actor
+        if context is not None:
+            params["context"] = context
+        if tools is not None:
+            params["tools"] = self._tool_list(tools)
+        if tool_choice is not None:
+            params["toolChoice"] = tool_choice
+        if fallback is not None:
+            params["fallbackOptionID"] = fallback
+        return params
+
+    async def generate(self, prompt: str, schema: Dict[str, Any], instructions: Optional[str] = None,
+                       context: Any = None, tools: Optional[Iterable[Union[str, Dict[str, Any]]]] = None,
+                       **settings: Any) -> Any:
+        """Generates JSON matching ``schema`` (``content/generate``) and returns it.
+        ``settings``: ``temperature``, ``toolTimeoutSeconds``, ``model``."""
+        params: Dict[str, Any] = {"prompt": prompt, "schema": schema}
+        if instructions is not None:
+            params["instructions"] = instructions
+        if context is not None:
+            params["context"] = context
+        if tools is not None:
+            params["tools"] = self._tool_list(tools)
+        params.update(settings)
+        return (await self.request("content/generate", params))["content"]
+
+    # ---- world state ---------------------------------------------------------------------------
+
+    async def create_world(self, state: Optional[Dict[str, Any]] = None, world: Optional[str] = None) -> "World":
+        """Creates a shared JSON world state (an object) and returns its handle."""
+        params: Dict[str, Any] = {}
+        if world is not None:
+            params["world"] = world
+        if state is not None:
+            params["state"] = state
+        result = await self.request("world/create", params)
+        return World(self, result["world"])
+
+    def world(self, world_id: str) -> "World":
+        """A handle for an existing world (no request is sent)."""
+        return World(self, world_id)
+
+    async def list_worlds(self) -> List[Dict[str, Any]]:
+        return (await self.request("world/list"))["worlds"]
 
     # ---- incoming ----------------------------------------------------------------------------
 
@@ -378,6 +572,10 @@ class Bridge:
                 task = self._tool_tasks.pop(str(params.get("id")), None)
                 if task is not None:
                     task.cancel()
+            if method == "world/changed" and isinstance(params, dict):
+                world_handler = self._world_handlers.get(str(params.get("subscription")))
+                if world_handler is not None:
+                    self._safely(world_handler, params)
             handler = self._event_handlers.get(params.get("requestId")) if isinstance(params, dict) else None
             if handler is not None and method != "tool/cancel":
                 self._safely(handler, params)
@@ -490,3 +688,133 @@ class Session:
     async def compact(self, keep_recent_turns: int = 2) -> Optional[str]:
         result = await self.bridge.request("session/compact", {"session": self.id, "keepRecentTurns": keep_recent_turns})
         return result.get("summary")
+
+
+class NPC:
+    """A non-player character on the bridge (``npc/*`` methods)."""
+
+    def __init__(self, bridge: Bridge, npc_id: str, tools: List[str], warnings: List[str]):
+        self.bridge = bridge
+        self.id = npc_id
+        self.tools = tools
+        self.warnings = warnings
+
+    def __repr__(self) -> str:
+        return "NPC({!r})".format(self.id)
+
+    async def talk(self, line: str, context: Any = None,
+                   on_line: Optional[Callable[[str], None]] = None,
+                   on_emotion: Optional[Callable[[str], None]] = None,
+                   on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+                   tool_choice: Any = None) -> Dict[str, Any]:
+        """One conversation turn. Returns the dialogue turn (``line``, ``emotion``,
+        ``playerOptions``, ``endsConversation``, ``toolCalls``, ``relationship``,
+        ``isFallback``, ``usage``).
+
+        ``on_line`` receives the whole line shown so far after every change (a
+        typewriter effect), ``on_emotion`` the emotion as soon as it is known, and
+        ``on_event`` every raw ``npc/event`` payload. Any of them turns on streaming.
+        """
+        params: Dict[str, Any] = {"npc": self.id, "line": line}
+        if context is not None:
+            params["context"] = context
+        if tool_choice is not None:
+            params["toolChoice"] = tool_choice
+        handler = None
+        if on_line is not None or on_emotion is not None or on_event is not None:
+            params["stream"] = True
+            shown = [""]
+
+            def handler(notification: Dict[str, Any]) -> None:
+                event = notification.get("event", {})
+                kind = event.get("type")
+                if on_event is not None:
+                    on_event(event)
+                if kind == "emotion" and on_emotion is not None:
+                    on_emotion(event.get("emotion", "neutral"))
+                elif kind in ("lineDelta", "lineReset"):
+                    shown[0] = shown[0] + event.get("delta", "") if kind == "lineDelta" else event.get("line", "")
+                    if on_line is not None:
+                        on_line(shown[0])
+        return await self.bridge.request("npc/talk", params, on_event=handler)
+
+    async def bark(self, situation: Any = None) -> str:
+        """A short ambient line (fast; no history). Raises on guardrail blocks: skip the bark."""
+        params: Dict[str, Any] = {"npc": self.id}
+        if situation is not None:
+            params["situation"] = situation
+        return (await self.bridge.request("npc/bark", params))["line"]
+
+    async def state(self, settle: bool = True) -> Dict[str, Any]:
+        """The save state (persona, memory, transcript, options, tools, world) for :meth:`Bridge.restore_npc`."""
+        return (await self.bridge.request("npc/state", {"npc": self.id, "settle": settle}))["state"]
+
+    async def update(self, persona: Optional[Dict[str, Any]] = None, options: Optional[Dict[str, Any]] = None,
+                     memory: Optional[Dict[str, Any]] = None,
+                     tools: Optional[Iterable[Union[str, Dict[str, Any]]]] = None) -> List[str]:
+        """Merge-patches persona, options and memory (``None`` values reset fields) and
+        replaces tools; applies from the next turn. Returns warnings."""
+        params: Dict[str, Any] = {"npc": self.id}
+        if persona is not None:
+            params["persona"] = persona
+        if options is not None:
+            params["options"] = options
+        if memory is not None:
+            params["memory"] = memory
+        if tools is not None:
+            params["tools"] = self.bridge._tool_list(tools)
+        return (await self.bridge.request("npc/update", params)).get("warnings", [])
+
+    async def reset(self, clear_memory: bool = False) -> None:
+        await self.bridge.request("npc/reset", {"npc": self.id, "clearMemory": clear_memory})
+
+    async def cancel(self) -> int:
+        return (await self.bridge.request("npc/cancel", {"npc": self.id}))["cancelled"]
+
+    async def delete(self) -> None:
+        await self.bridge.request("npc/delete", {"npc": self.id})
+
+
+class World:
+    """A shared JSON world state (``world/*`` methods). Paths are dot paths such as
+    ``"player.gold"``; ``""`` is the root."""
+
+    def __init__(self, bridge: Bridge, world_id: str):
+        self.bridge = bridge
+        self.id = world_id
+
+    def __repr__(self) -> str:
+        return "World({!r})".format(self.id)
+
+    async def get(self, path: str = "", default: Any = None) -> Any:
+        result = await self.bridge.request("world/get", {"world": self.id, "path": path})
+        return result["value"] if result["exists"] else default
+
+    async def set(self, path: str, value: Any) -> int:
+        """Writes ``value`` (``None`` stores JSON null); returns the new version."""
+        return (await self.bridge.request("world/set", {"world": self.id, "path": path, "value": value}))["version"]
+
+    async def merge(self, patch: Dict[str, Any], path: str = "") -> int:
+        """Applies a JSON merge patch (``None`` deletes keys); returns the new version."""
+        return (await self.bridge.request("world/merge", {"world": self.id, "path": path, "patch": patch}))["version"]
+
+    async def remove(self, path: str) -> Any:
+        """Removes the value at ``path`` and returns it (``None`` if there was none)."""
+        return (await self.bridge.request("world/remove", {"world": self.id, "path": path}))["oldValue"]
+
+    async def snapshot(self) -> Dict[str, Any]:
+        return (await self.bridge.request("world/snapshot", {"world": self.id}))["state"]
+
+    async def subscribe(self, handler: Callable[[Dict[str, Any]], None], path: str = "") -> str:
+        """Calls ``handler`` with every ``world/changed`` notification (``path``,
+        ``oldValue``?, ``newValue``?) at, inside or above ``path``. Returns the subscription id."""
+        result = await self.bridge.request("world/subscribe", {"world": self.id, "path": path})
+        self.bridge._world_handlers[result["subscription"]] = handler
+        return result["subscription"]
+
+    async def unsubscribe(self, subscription: str) -> None:
+        self.bridge._world_handlers.pop(subscription, None)
+        await self.bridge.request("world/unsubscribe", {"subscription": subscription})
+
+    async def delete(self) -> None:
+        await self.bridge.request("world/delete", {"world": self.id})

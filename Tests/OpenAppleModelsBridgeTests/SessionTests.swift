@@ -48,6 +48,17 @@ struct SessionTests {
         #expect(deleteAgain.errorCode == -32020)
     }
 
+    @Test func manyToolsAreWarnedAbout() async throws {
+        let harness = BridgeHarness()
+        let tools: [JSONValue] = (1...6).map { ["name": .string("tool_\($0)"), "description": .string("Does thing \($0).")] }
+        let created = try await harness.result("session/create", ["model": "scripted", "tools": .array(tools)])
+        let warnings = created["warnings"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        #expect(warnings.count == 1)
+        #expect(warnings.first?.contains("6 tools") == true)
+        let replaced = try await harness.result("session/setTools", ["session": created["session"]!, "tools": .array(Array(tools.prefix(3)))])
+        #expect(replaced["warnings"] == [])
+    }
+
     @Test func sessionLimit() async throws {
         let harness = BridgeHarness { $0.maxSessions = 1 }
         _ = try await harness.createSession(steps: [])
@@ -255,6 +266,35 @@ struct SessionTests {
         #expect(clock.now - start < .milliseconds(750))
     }
 
+    @Test func concurrentSessionsWithClientToolsKeepPerRequestOrder() async throws {
+        let harness = BridgeHarness()
+        harness.box.setResponder { _, params in ["output": .string("ok \(params["session"]?.stringValue ?? "?")")] }
+        var sessions: [String] = []
+        for index in 0..<8 {
+            sessions.append(try await harness.createSession("c\(index)", steps: [
+                ["toolCalls": [["name": "open_gate", "arguments": ["gate": .string("g\(index)")]]], "delayMs": .number(Double(index % 3 * 10))],
+                ["template": "{toolOutput}", "chunks": 4],
+            ], tools: [Self.openGate]))
+        }
+        let sent = sessions.map { session in
+            (session, harness.send("session/respond", ["session": .string(session), "prompt": "go", "stream": true]))
+        }
+        for (session, request) in sent {
+            let response = try await harness.response(to: request)
+            #expect(response["result"]?["text"] == .string("ok \(session)"))
+        }
+        await harness.engine.flush()
+        let messages = harness.box.messages
+        for (session, request) in sent {
+            let responses = messages.indices.filter { messages[$0]["id"] == .string(request) && messages[$0]["method"] == nil }
+            #expect(responses.count == 1)
+            let related = messages.indices.filter { messages[$0]["params"]?["requestId"] == .string(request) }
+            #expect(related.contains { messages[$0]["method"] == "tool/call" })
+            #expect(related.allSatisfy { messages[$0]["params"]?["session"] == .string(session) })
+            if let response = responses.first { #expect(related.allSatisfy { $0 < response }) }
+        }
+    }
+
     @Test func pipelinedRequestsKeepTheirOrder() async throws {
         let harness = BridgeHarness()
         let model: JSONValue = ["type": "scripted", "steps": [["template": "A:{prompt}", "delayMs": 50], ["template": "B:{prompt}"]]]
@@ -349,6 +389,37 @@ struct SessionTests {
         #expect(wrapped["result"] != nil)
         let garbage = try await harness.call("session/create", ["history": ["entries": 5], "model": "scripted"])
         #expect(garbage.errorCode == -32602)
+    }
+
+    @Test func historyAloneRestoresInstructionsAndTools() async throws {
+        let harness = BridgeHarness()
+        harness.box.setResponder { call, _ in ["output": .string("opened \(call["arguments"]?["gate"]?.stringValue ?? "?")")] }
+        let original = try await harness.createSession(steps: [["text": "Aye."]], tools: [Self.openGate], instructions: "You are a guard.")
+        _ = try await harness.result("session/respond", ["session": .string(original), "prompt": "Hello"])
+        let saved = try #require(try await harness.result("session/transcript", ["session": .string(original)])["transcript"])
+
+        let restored = try await harness.result("session/create", [
+            "history": saved,
+            "model": ["type": "scripted", "steps": [
+                ["toolCalls": [["name": "open_gate", "arguments": ["gate": "east"]]]],
+                ["template": "{toolOutput}"],
+            ]],
+        ])
+        let id = try #require(restored["session"])
+        #expect(restored["warnings"] == [])
+        let entry = try await harness.result("session/list")["sessions"]?.arrayValue?.first { $0["session"] == id }
+        #expect(entry?["instructions"] == "You are a guard.")
+        #expect(entry?["tools"] == ["open_gate"])
+        #expect(entry?["entries"] == 2)
+        let reply = try await harness.result("session/respond", ["session": id, "prompt": "Open east", "toolChoice": ["tool": "open_gate"]])
+        #expect(reply["text"] == "opened east")
+        #expect(reply["steps"]?[0]?["enabledTools"] == ["open_gate"])
+
+        // Keys that are present win over the saved values, even when null or empty.
+        let overridden = try await harness.result("session/create", ["history": saved, "instructions": .null, "tools": [], "model": "scripted"])
+        let other = try await harness.result("session/list")["sessions"]?.arrayValue?.first { $0["session"] == overridden["session"] }
+        #expect(other?["instructions"] == nil)
+        #expect(other?["tools"] == [])
     }
 
     @Test func mutatingSessionSettings() async throws {

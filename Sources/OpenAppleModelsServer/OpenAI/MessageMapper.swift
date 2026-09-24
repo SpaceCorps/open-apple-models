@@ -33,12 +33,33 @@ enum MessageMapper {
         case image(ImageDecoding.Decoded)
     }
 
+    /// The tool calls of the latest assistant message, while their tool
+    /// messages are being collected.
+    private struct ToolBatch {
+        /// Call ids in the order the assistant made the calls.
+        var order: [String]
+        var names: [String: String]
+        var outputs: [String: Transcript.ToolOutput] = [:]
+
+        var missing: [String] { order.filter { outputs[$0] == nil } }
+        var isComplete: Bool { outputs.count == order.count }
+        /// The outputs in call order (the order the calls were made in).
+        var entries: [Transcript.Entry] { order.compactMap { outputs[$0].map(Transcript.Entry.toolOutput) } }
+    }
+
+    /// Maps `messages`, validating the conversation's shape.
+    ///
+    /// Tool calls are validated strictly, because on-device inference pairs
+    /// each tool output with its call by id: every `tool_calls` id must be
+    /// unique and answered by exactly one `tool` message, and those tool
+    /// messages must directly follow the assistant message that made the
+    /// calls. Outputs are placed in the transcript in call order.
     static func map(_ messages: [JSONValue]) throws(OpenAIError) -> MappedConversation {
         var instructions: [String] = []
         var entries: [Transcript.Entry] = []
         var pendingUser: [UserPart]?
-        var callNames: [String: String] = [:]
-        var unanswered: [String] = []  // Tool call ids awaiting a tool message.
+        var knownCallIDs: Set<String> = []
+        var batch: ToolBatch?
         var lastRole = ""
 
         func flushUser() {
@@ -47,16 +68,20 @@ enum MessageMapper {
             pendingUser = nil
         }
 
+        func missingOutputs(_ batch: ToolBatch, param: String) -> OpenAIError {
+            .invalidRequest(
+                "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. "
+                    + "Missing responses for: \(batch.missing.joined(separator: ", ")).",
+                param: param, code: "missing_tool_output")
+        }
+
         for (index, value) in messages.enumerated() {
             let path = "messages[\(index)]"
             let message = try JSONParams(value, path: path)
             let role = try message.requiredString("role")
 
-            if role != "tool", !unanswered.isEmpty {
-                throw .invalidRequest(
-                    "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. "
-                        + "Missing responses for: \(unanswered.joined(separator: ", ")).",
-                    param: path, code: "missing_tool_output")
+            if role != "tool", let batch {
+                throw missingOutputs(batch, param: path)
             }
 
             switch role {
@@ -74,26 +99,44 @@ enum MessageMapper {
                 flushUser()
                 var text = try textContent(message, allowNull: true)
                 if text.isEmpty, let refusal = try message.string("refusal") { text = refusal }
-                let calls = try toolCalls(message)
+                let calls = try toolCalls(message, knownIDs: &knownCallIDs)
                 if !text.isEmpty {
                     entries.append(.response(Transcript.Response(segments: [.text(Transcript.TextSegment(content: text))])))
                 }
                 if !calls.isEmpty {
-                    for call in calls { callNames[call.id] = call.toolName }
-                    unanswered = calls.map(\.id)
                     entries.append(.toolCalls(Transcript.ToolCalls(calls)))
+                    batch = ToolBatch(order: calls.map(\.id), names: Dictionary(uniqueKeysWithValues: calls.map { ($0.id, $0.toolName) }))
                 }
             case "tool":
                 flushUser()
+                let idParam = message.param("tool_call_id")
                 let id = try message.requiredString("tool_call_id")
-                guard let name = callNames[id] else {
+                guard var current = batch, let name = current.names[id] else {
+                    if knownCallIDs.contains(id) {
+                        throw .invalidRequest(
+                            "Invalid 'tool_call_id' '\(id)': that tool call was already answered. Each tool call needs exactly one "
+                                + "'tool' message, placed directly after the assistant message that made the call.",
+                            param: idParam, code: "duplicate_tool_output")
+                    }
                     throw .invalidRequest(
                         "Invalid 'tool_call_id' '\(id)': no earlier assistant message has a tool call with this id.",
-                        param: message.param("tool_call_id"), code: "unknown_tool_call_id")
+                        param: idParam, code: "unknown_tool_call_id")
                 }
-                unanswered.removeAll { $0 == id }
+                guard current.outputs[id] == nil else {
+                    throw .invalidRequest(
+                        "Invalid 'tool_call_id' '\(id)': more than one 'tool' message responds to this tool call.",
+                        param: idParam, code: "duplicate_tool_output")
+                }
                 let text = try textContent(message, allowNull: false)
-                entries.append(.toolOutput(Transcript.ToolOutput(id: id, toolName: name, segments: [.text(Transcript.TextSegment(content: text))])))
+                // The output's id must equal its call's id: on-device inference
+                // pairs them by id and fails to tokenize the prompt otherwise.
+                current.outputs[id] = Transcript.ToolOutput(id: id, toolName: name, segments: [.text(Transcript.TextSegment(content: text))])
+                if current.isComplete {
+                    entries += current.entries
+                    batch = nil
+                } else {
+                    batch = current
+                }
             case "function":
                 throw message.invalid("role", "The legacy 'function' role is not supported; use 'tool' messages.")
             default:
@@ -101,6 +144,7 @@ enum MessageMapper {
             }
             lastRole = role
         }
+        if let batch { throw missingOutputs(batch, param: "messages") }
 
         let joinedInstructions = instructions.isEmpty ? nil : instructions.joined(separator: "\n\n")
         switch lastRole {
@@ -110,11 +154,6 @@ enum MessageMapper {
                 instructions: joinedInstructions, history: entries, prompt: prompt(parts),
                 promptText: plainText(parts), continuesAfterToolOutput: false)
         case "tool":
-            if !unanswered.isEmpty {
-                throw .invalidRequest(
-                    "Missing tool messages for tool_call_id: \(unanswered.joined(separator: ", ")).",
-                    param: "messages", code: "missing_tool_output")
-            }
             return MappedConversation(
                 instructions: joinedInstructions, history: entries, prompt: Prompt(""),
                 promptText: "", continuesAfterToolOutput: true)
@@ -186,25 +225,36 @@ enum MessageMapper {
         return parts
     }
 
-    private static func toolCalls(_ message: JSONParams) throws(OpenAIError) -> [Transcript.ToolCall] {
+    /// The `tool_calls` of an assistant message. Call ids must be non-empty
+    /// and unique across the conversation; each is added to `knownIDs`.
+    private static func toolCalls(_ message: JSONParams, knownIDs: inout Set<String>) throws(OpenAIError) -> [Transcript.ToolCall] {
         guard let calls = try message.array("tool_calls") else { return [] }
         var result: [Transcript.ToolCall] = []
         for (index, value) in calls.enumerated() {
             let call = try JSONParams(value, path: message.param("tool_calls[\(index)]"))
             let id = try call.requiredString("id")
+            guard !id.isEmpty else { throw call.invalid("id", "A tool call 'id' must not be empty.") }
+            guard knownIDs.insert(id).inserted else {
+                throw .invalidRequest(
+                    "Duplicate tool call id '\(id)': every tool call in the conversation needs a unique id.",
+                    param: call.param("id"), code: "duplicate_tool_call_id")
+            }
             let type = try call.string("type") ?? "function"
             guard type == "function" else { throw call.invalid("type", "Unsupported tool call type '\(type)'.") }
             let function = try call.requiredObject("function")
             let name = try function.requiredString("name")
+            guard !name.isEmpty else { throw function.invalid("name", "A tool call's function 'name' must not be empty.") }
             let argumentsText = try function.string("arguments") ?? ""
-            let arguments: JSONValue
-            if argumentsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                arguments = [:]
-            } else {
+            var arguments: JSONValue = [:]
+            if !argumentsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 do {
                     arguments = try JSONValue(parsing: argumentsText)
                 } catch {
-                    throw function.invalid("arguments", "'arguments' must be a JSON-encoded string: \(error)")
+                    throw function.invalid("arguments", "'arguments' must be a JSON-encoded object: \(error)")
+                }
+                if arguments.isNull { arguments = [:] }
+                guard case .object = arguments else {
+                    throw function.invalid("arguments", "'arguments' must be a JSON-encoded object, got: \(argumentsText.prefix(80))")
                 }
             }
             result.append(Transcript.ToolCall(id: id, toolName: name, arguments: arguments.generatedContent))

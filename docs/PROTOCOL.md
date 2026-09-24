@@ -2,7 +2,9 @@
 
 The bridge lets game engines and other languages drive on-device Apple Foundation Models **agents**, with
 **real tool calls**: the model decides to call a tool, *your engine* executes it (play an animation, open a
-door, query game state) and replies, and the model continues with the result.
+door, query game state) and replies, and the model continues with the result. On top of raw agent sessions it
+serves [game methods](#6-game-methods-npc-decision-world-contentgenerate): NPCs with personas, memory and save
+states, enum-constrained decisions, a shared world-state blackboard, and schema-shaped content generation.
 
 It is one [JSON-RPC 2.0](https://www.jsonrpc.org/specification) protocol with three transports:
 
@@ -26,7 +28,8 @@ Bindings: `bindings/python/open_apple_models.py`, `bindings/unity/OpenAppleModel
 * Request ids may be strings or numbers and are echoed back exactly. `null` ids are rejected.
 * Batches (JSON arrays) are **not supported**: send one message per line.
 * Params are always **by name** (an object). Absent params mean `{}`. `null` members are treated as absent.
-* Unknown members in `session/create` and `session/respond` are ignored and reported in `warnings`.
+* Unknown members in `session/create`, `session/respond`, `npc/create`, `npc/restore`, `npc/talk`, `npc/update`,
+  `decision/*` and `content/generate` (and unknown `persona`/`options` fields) are ignored and reported in `warnings`.
 * Blank lines are ignored.
 
 Message kinds:
@@ -36,7 +39,7 @@ Message kinds:
 | client → bridge | request (has `id`) | `{"jsonrpc":"2.0","id":1,"method":"session/respond","params":{…}}` |
 | client → bridge | notification (no `id`, no response) | `{"jsonrpc":"2.0","method":"session/cancel","params":{"session":"gorm"}}` |
 | bridge → client | response to your request | `{"jsonrpc":"2.0","id":1,"result":{…}}` or `{"jsonrpc":"2.0","id":1,"error":{…}}` |
-| bridge → client | notification | `session/event`, `tool/cancel` |
+| bridge → client | notification | `session/event`, `npc/event`, `world/changed`, `tool/cancel` |
 | bridge → client | request (you must respond) | `tool/call` with id `"t-<n>"` |
 | client → bridge | response to a bridge request | `{"jsonrpc":"2.0","id":"t-3","result":{"output":"…"}}` |
 
@@ -50,12 +53,12 @@ Message kinds:
 3. **Per-session order.** Turn-affecting operations on one session — `session/respond`, `session/reset`,
    `session/compact`, `session/setInstructions`, `session/setContextNote`, `session/setTools` — run one after
    another in arrival order. (`session/cancel`, `session/delete`, `session/list` and `session/transcript` act
-   immediately.)
+   immediately.) NPCs work the same way: `npc/talk`, `npc/update`, `npc/reset` and `npc/state` are ordered per NPC.
 4. **Your responses bypass the queue.** A response to `tool/call` is applied the moment it arrives, so a waiting
    turn is never stuck behind other requests.
 5. **Output order.** The bridge emits messages one at a time, never concurrently (C ABI: your callback is never
-   re-entered), in the order they were produced. For any request, **every `session/event` notification and
-   `tool/call` request it causes is sent before its response.** Events for one turn are in the order they
+   re-entered), in the order they were produced. For any request, **every `session/event`/`npc/event`/`world/changed`
+   notification and `tool/call` request it causes is sent before its response.** Events for one turn are in the order they
    happened.
 6. Every request gets exactly one response (unless the bridge is destroyed through the C ABI first). Cancelled
    turns get an error response with code `-32009` (`cancelled`).
@@ -130,7 +133,7 @@ Result:
   "server": {"name": "open-apple-models", "version": "0.1.0"},
   "capabilities": {
     "methods": ["initialize", "model/availability", "ping", "schema/validate", "session/cancel", "…"],
-    "notifications": ["session/event", "tool/cancel"],
+    "notifications": ["session/event", "tool/cancel", "npc/event", "world/changed"],
     "clientRequests": ["tool/call"],
     "streaming": true, "clientTools": true, "structuredOutput": true,
     "models": ["system", "scripted"], "maxSessions": 64, "batch": false
@@ -139,7 +142,7 @@ Result:
 }
 ```
 
-`capabilities.methods` includes methods added by extensions (e.g. NPC/decision/world methods).
+`capabilities.methods` includes methods added by extensions, such as the [game methods](#6-game-methods-npc-decision-world-contentgenerate).
 
 ### `ping`
 
@@ -164,10 +167,10 @@ Creates an agent with its own conversation.
 |---|---|---|---|
 | `session` | string | generated (`s1`, `s2`, …) | 1–128 printable characters; must be unused |
 | `instructions` | string | none | system instructions (persona, rules) |
-| `tools` | array | `[]` | [tool definitions](#tool-definitions); Apple recommends ≤ 3–5 tools per request on-device |
+| `tools` | array | `[]` | [tool definitions](#9-tool-definitions); Apple recommends ≤ 3–5 tools per request on-device |
 | `options` | object | | see below |
-| `history` | object | | a transcript from `session/transcript` (either the `transcript` value or the whole result) |
-| `model` | string/object | `"system"` | `"system"`, `{"type": "scripted", …}` ([scripted model](#scripted-model)), or a custom type the host registered |
+| `history` | object | | a transcript from `session/transcript` (either the `transcript` value or the whole result). When `instructions` or `tools` are **absent**, the ones saved in the transcript are used, so `{"history": …}` alone resumes a conversation; a present key (even `null` or `[]`) wins |
+| `model` | string/object | `"system"` | `"system"`, `{"type": "scripted", …}` ([scripted model](#10-scripted-model)), or a custom type the host registered |
 
 `options`:
 
@@ -186,7 +189,8 @@ Creates an agent with its own conversation.
 | `maxAttempts` | int ≥ 1 | 2 | automatic retries of transient model failures (never after a tool ran) |
 
 Result: `{"session": "guard", "warnings": ["open_gate: #/properties/code: pattern '…' is described to the model but not enforced", …]}`.
-Warnings cover unenforceable schema constraints, unknown parameters, missing tool descriptions and an unavailable model.
+Warnings cover unenforceable schema constraints, unknown parameters, missing tool descriptions, more than 5 tools
+(Apple recommends 3–5 per request on-device) and an unavailable model.
 
 ### `session/respond`
 
@@ -252,7 +256,9 @@ in creation order. `entries` counts transcript entries after the instructions (p
 `{"session"}` → `{"session", "transcript": {"type": "FoundationModels.Transcript", "version": "1.1", "transcript": {"entries": […]}}}`.
 
 The transcript is FoundationModels' own `Codable` form. Save it (e.g. with the game save) and pass it as `history`
-to `session/create` to resume. Reading during a running turn returns the in-progress state.
+to `session/create` to resume: the instructions and tool definitions saved in it are restored unless you send
+`instructions`/`tools` (restored tools are client tools with the session's default timeout; `options` are not
+saved, so send them again). Reading during a running turn returns the in-progress state.
 
 ### `session/setInstructions`
 
@@ -289,7 +295,255 @@ requests receive their error responses first (bounded wait). Afterwards every re
 Hosts get a callback after the response has been delivered (`BridgeConfiguration.onShutdown`), which a
 stdio server uses to exit.
 
-## 6. Messages from the bridge
+## 6. Game methods (`npc/*`, `decision/*`, `world/*`, `content/generate`)
+
+Served by `GameExtension`, which `BridgeConfiguration.standardExtensions()` includes, so every transport (stdio,
+C ABI, Swift) has them. They wrap `OpenAppleModelsGame` (see [`GAMES.md`](GAMES.md) for how NPCs prompt the model).
+Every method that runs the model takes the same `model` parameter as `session/create`, so all of them work with a
+[scripted model](#10-scripted-model) in CI.
+
+| Method | Result | Timing |
+|---|---|---|
+| `npc/create` | `{npc, tools, warnings}` | immediate |
+| `npc/talk` | a dialogue turn | queued per NPC |
+| `npc/bark` | `{npc, line}` | concurrent (one-off session) |
+| `npc/state` | `{npc, state}` (save) | queued per NPC (`settle: false`: immediate) |
+| `npc/restore` | `{npc, tools, warnings}` | immediate |
+| `npc/update` | `{npc, warnings}` | queued per NPC |
+| `npc/reset` | `{npc}` | queued per NPC |
+| `npc/cancel`, `npc/delete`, `npc/list` | | immediate |
+| `decision/decide`, `decision/decideMany` | a decision / `{results}` | concurrent |
+| `world/*` | | immediate, atomic |
+| `content/generate` | `{content}` | concurrent |
+
+**Per-NPC order.** `npc/talk`, `npc/update`, `npc/reset` and `npc/state` on one NPC run one after another in arrival
+order, so they can be pipelined (an update sent after a talk applies after that turn and before the next).
+Different NPCs talk concurrently, although the on-device model mostly processes one request at a time.
+
+### NPCs
+
+An NPC is a persona, a conversation, a memory (facts, relationship, summary), optional client tools and an optional
+world. Each `npc/talk` is one turn: the model may call tools first, then it replies with an emotion, a spoken line,
+suggested player replies and whether the conversation ends. Older turns are summarized in the background
+(`compactAfterTurns`) so long conversations fit the 8192-token context.
+
+#### `npc/create`
+
+| Param | Type | Default | |
+|---|---|---|---|
+| `npc` | string | generated (`npc1`, …) | 1–128 printable characters; must be unused |
+| `persona` | object | required | see below |
+| `tools` | array | `[]` | [client tool definitions](#9-tool-definitions); executed via `tool/call` with `"npc"` in the params |
+| `world` | string | none | a world id. Adds the local tools `read_world_state` and, with `options.worldWritable`, `update_world_state` |
+| `memory` | object | empty | `{"facts": [string], "relationship": -100…100, "summary"?: string}` |
+| `options` | object | | see below |
+| `model` | string/object | `"system"` | as in `session/create` |
+
+`persona` (only `name` is required; keep every field short — the model has 8192 tokens for everything):
+
+| Field | Type | Default | |
+|---|---|---|---|
+| `name` | string | required | `"Gorm"` |
+| `role` | string | `""` | `"the village blacksmith"` |
+| `personality`, `speakingStyle`, `backstory` | string | `""` | a sentence or two each |
+| `goals`, `knowledge` | [string] | `[]` | |
+| `secrets` | [string] | `[]` | left out of the prompt until `relationship` reaches `options.secretsUnlockAtRelationship` |
+| `defaultEmotion` | emotion | `"neutral"` | used when the model gives none, and for fallback lines |
+| `maxSentences` | int | 2 | reply length limit |
+
+Emotions: `neutral`, `happy`, `sad`, `angry`, `afraid`, `surprised`, `suspicious`, `amused`, `disgusted`, `excited`,
+`curious`, `confused`, `worried`, `grateful`, `annoyed`, `proud`.
+
+`options` (all optional; unknown keys are warned about):
+
+| Option | Default | |
+|---|---|---|
+| `replyFormat` | `"automatic"` | `"automatic"`, `"structured"` or `"text"` — see the trade-off below |
+| `groundingTool` | none | a tool the NPC must call first on every turn (e.g. `"check_inventory"`, `"read_world_state"`). The small model often skips tools and invents facts in `auto` mode; this forces the lookup on the first step only |
+| `toolChoice` | `"auto"` | `"auto"`/`"none"`/`"required"`/`{"tool": name}`, used when `groundingTool` is not set |
+| `maxToolRounds`, `maxToolCalls` | 2, 6 | per turn |
+| `toolTimeoutSeconds` | 120 | time the engine has to answer a `tool/call` (`0` = forever); a tool's own `timeoutSeconds` wins |
+| `worldReadable` | `[""]` | world paths `read_world_state` may read (`""` = everything, `[]` = no read tool) |
+| `worldWritable` | `[]` | world paths `update_world_state` may change (`[]` = no write tool) |
+| `worldContextPaths` | `[]` | world paths summarized into every prompt (cheap grounding without a tool round) |
+| `memoryTools` | `[]` | `["rememberFact", "changeRelationship"]`, `"all"` or `"none"`: lets the model store facts (`remember_fact`) and change its attitude (`change_relationship`) |
+| `maxFacts`, `maxRelationshipChange` | 12, 10 | |
+| `secretsUnlockAtRelationship` | 50 | `null` always includes secrets with a rule to guard them (the small model leaks them readily) |
+| `emotions` | all | emotions the model may choose from |
+| `playerOptionCount` | 3 | suggested player replies (0–4; structured replies only) |
+| `canEndConversation` | `true` | |
+| `extraInstructions` | none | appended to the persona's instructions |
+| `compactAfterTurns`, `keepRecentTurns` | 8, 2 | background summarization (`0` disables it) |
+| `fallbackOnGuardrail` | `true` | a blocked turn returns a fallback line (`isFallback: true`) instead of error `-32002` |
+| `fallbackLines` | neutral lines | rotated fallback lines |
+| `temperature`, `maximumResponseTokens` | model default | |
+| `barkMaximumTokens` | 48 | |
+
+**`replyFormat` trade-off.** On device, Apple's guardrails block schema-guided (JSON) generation far more often than
+plain text, and ordinary fantasy dialogue triggers them (in the game layer's live runs, 3 of 6 typical player lines
+were blocked in structured mode even with the default framing).
+
+| Format | Reply | Guardrails | Speed |
+|---|---|---|---|
+| `automatic` (default) | structured; if blocked, the turn is retried **once** as plain text with tools off (tool results already gathered are reused), then a fallback line | best of both | structured speed; a blocked turn costs one extra call |
+| `structured` | `emotion` (from `emotions`), `line`, `playerOptions`, `endsConversation` | blocked most often (→ fallback lines) | ~2.5–5 s with a tool round |
+| `text` | `[emotion] line` parsed into `emotion` and `line`; `playerOptions` is always `[]`, `endsConversation` always `false` | blocked least; the only format that a permissive-guardrails model (a host-side `modelFactory` choice) affects | fastest (~1.5–2 s with a forced tool) |
+
+Result: `{"npc": "gorm", "tools": ["check_inventory", "read_world_state"], "warnings": []}`. `tools` lists every tool
+the model sees (client tools plus built-in world and memory tools); more than 5 is warned about. Errors:
+`-32602` (bad persona or options, unknown `groundingTool`, duplicate tool names), `-32051 npc_exists`,
+`-32052 world_not_found`, `-32055 limit_reached` (128 NPCs).
+
+#### `npc/talk`
+
+| Param | Type | |
+|---|---|---|
+| `npc` | string | required |
+| `line` | string | required; what the player says (`""` = nothing) |
+| `context` | string or JSON | what is happening right now ("The player just paid 45 gold."); this turn only |
+| `stream` | bool | `false`. When true, [`npc/event`](#npcevent-notification) notifications are sent while the turn runs |
+| `toolChoice` | | per-turn override; a tool the NPC lacks fails the turn with `-32011 invalid_request` |
+
+Result:
+
+```json
+{"npc": "gorm",
+ "line": "Aye, I've got iron swords—3 in stock, 45 gold each.",
+ "emotion": "proud",
+ "playerOptions": ["Buy one for 45 gold", "Want more?", "What else do you need?"],
+ "endsConversation": false,
+ "toolCalls": [{"call": {"id": "call_…", "name": "check_inventory", "arguments": {"item": "iron sword"}},
+                "output": {"item": "iron sword", "stock": 3, "price_gold": 45}, "isError": false, "durationSeconds": 0.01}],
+ "relationship": 0,
+ "isFallback": false,
+ "usage": {"inputTokens": 912, "cachedInputTokens": 880, "outputTokens": 41, "totalTokens": 953}}
+```
+
+* Client tools arrive as `tool/call` requests with params `{"npc", "requestId", "call"}` and are answered exactly as
+  for sessions (timeouts send `tool/cancel`).
+* `relationship` is the NPC's attitude after the turn. `isFallback` marks a guardrail-blocked (or refused) turn
+  answered with a fallback line; the blocked exchange is not added to the history, but tool side effects
+  (e.g. world writes) that already happened stay.
+* A failed or cancelled turn leaves the history unchanged. Measured on device with a forced client tool: 3.3–4.1 s
+  per turn, 9–12 `lineDelta` events.
+
+#### `npc/bark`
+
+`{"npc", "situation"?: string or JSON}` → `{"npc", "line"}`. A short ambient line ("Rain again. Good for
+quenching."). Uses a separate one-off session — no history, memory or tools — so it is fast (~0.7–0.9 s) and runs
+even while a conversation turn is in progress. Errors (including `guardrail_violation`) are returned as is: skip the bark.
+
+#### `npc/state`
+
+`{"npc", "settle"?: true}` → `{"npc", "state"}`. The save state:
+
+```json
+{"version": 1,
+ "persona": {"name": "Gorm", "role": "the village blacksmith", "…": "…"},
+ "memory": {"facts": ["Aria likes axes."], "relationship": 25, "summary": "…"},
+ "transcript": {"…FoundationModels transcript…": "…"},
+ "npc": "gorm",
+ "options": {"replyFormat": "automatic", "toolTimeoutSeconds": 120, "…every option…": "…"},
+ "tools": [{"name": "check_inventory", "…": "…"}],
+ "world": "village"}
+```
+
+With `settle` (the default) the save waits for the NPC's earlier requests and background compaction; `settle: false`
+answers immediately with the completed turns. Store the whole object in the game save.
+
+#### `npc/restore`
+
+`{"state", "npc"?, "tools"?, "options"?, "world"?, "model"?}` → `{"npc", "tools", "warnings"}`. Rebuilds an NPC from
+`npc/state` (the `state` value or the whole result). Id, tools, options and world default to the ones in the save;
+a key you send (even `null` or `[]`) wins. The model is not saved: send `model` again unless it is the system model.
+A saved world that no longer exists is dropped with a warning. Errors as for `npc/create`.
+
+#### `npc/update`
+
+`{"npc", "persona"?, "options"?, "memory"?, "tools"?}` → `{"npc", "warnings"}`. `persona`, `options` and `memory` are
+JSON merge patches (RFC 7386: send only the fields to change; `null` resets a field to its default); `tools`
+replaces the client tools. Queued in order with the NPC's turns; applies from the next turn. All-or-nothing: an
+invalid update changes nothing. Example — the player finished a quest:
+
+```json
+{"npc": "gorm", "memory": {"relationship": 40, "facts": ["Aria returned the lost ring."]},
+ "persona": {"personality": "Grateful to Aria, still gruff with strangers."}}
+```
+
+#### `npc/reset`, `npc/cancel`, `npc/delete`, `npc/list`
+
+* `npc/reset` `{"npc", "clearMemory"?: false}` → `{"npc"}`: clears the conversation (and the memory if asked).
+* `npc/cancel` `{"npc"}` → `{"npc", "cancelled": n}`: cancels the running turn and every queued request of the NPC
+  (each gets `-32009`; outstanding `tool/call`s get `tool/cancel`).
+* `npc/delete` `{"npc"}` → `{"npc", "deleted": true}`: cancels its work and frees it.
+* `npc/list` → `{"npcs": [{"npc", "name", "role", "world", "model", "tools": [client tool names], "turnCount",
+  "relationship", "busy", "pendingOperations", "createdAt"}]}` in creation order.
+
+### Decisions
+
+#### `decision/decide`
+
+Picks one of a fixed set of options — enemy tactics, companion reactions, haggling. The model writes a one-sentence
+reason, then the option id (enum-constrained, so always valid), then a confidence. ~1.2–1.8 s on device.
+
+| Param | Type | |
+|---|---|---|
+| `situation` | string (or JSON) | required; from the actor's point of view |
+| `options` | array | required: `[{"id": "flee", "description": "Run into the woods"}]` or plain id strings; ids unique |
+| `actor` | object or string | a persona object, or an NPC id to decide as that NPC |
+| `context` | any JSON | facts (`{"hp": 3, "playerHp": 40}`) |
+| `tools` | array | client tools; `tool/call` params are `{"requestId", "call"}` |
+| `toolChoice` | | default `"auto"`; `"required"` / `{"tool"}` forces a lookup first |
+| `fallbackOptionID` | string | returned (with `isFallback: true`) when guardrails block the decision — combat trips them often |
+| `instructions`, `temperature`, `maxToolRounds` (2), `toolTimeoutSeconds`, `model` | | engine settings |
+
+Result: `{"optionID": "flee", "reasoning": "Snik is timid, so he avoids a fight.", "confidence": 75, "toolCalls": [],
+"usage": {…}, "isFallback": false}`. With a single option the result comes back immediately (`confidence` 100)
+without a model call. Invalid options and fallbacks fail with `-32602` before any model call.
+
+#### `decision/decideMany`
+
+`{"requests": [decision params…], "maxConcurrency"?: 2, …engine settings}` → `{"results": [...]}`. Independent
+decisions (a crowd of NPCs) with shared engine settings (`instructions`, `temperature`, `maxToolRounds`,
+`toolTimeoutSeconds`, `model`). Results are in request order; a failed decision holds `{"error": {code, message,
+data}}` and does not affect the others. `tool/call` params include the decision's `"index"`.
+
+### World state
+
+A world is a JSON object — a blackboard for game state that the game and NPCs share. Paths are dot paths
+(`"player.gold"`, `"party.0.name"`; `""` is the root). World methods are synchronous and atomic, and answer at once.
+
+| Method | Params | Result |
+|---|---|---|
+| `world/create` | `world`? (id, default `w1`…), `state`? (object) | `{world, version}` |
+| `world/get` | `world`, `path`? | `{world, path, value, exists, version}` (`value` is `null` when absent) |
+| `world/set` | `world`, `path`?, `value` (any JSON, `null` included) | `{world, path, version}`. Creates missing objects on the way; index `n` of an `n`-element list appends |
+| `world/merge` | `world`, `patch`, `path`? | `{world, path, version}`. RFC 7386 merge patch: objects merge, `null` deletes |
+| `world/remove` | `world`, `path` | `{world, path, removed, oldValue, version}` |
+| `world/snapshot` | `world` | `{world, state, version}` |
+| `world/delete` | `world` | `{world, deleted, endedSubscriptions}`. NPCs created with it keep using it |
+| `world/list` | | `{worlds: [{world, version, npcs, subscriptions, createdAt}]}` |
+| `world/subscribe` | `world`, `path`? | `{subscription, world, path}`; then [`world/changed`](#worldchanged-notification) notifications |
+| `world/unsubscribe` | `subscription` | `{subscription, world, path, unsubscribed}` |
+
+`version` counts changes (cheap to poll). Errors: `-32052 world_not_found`, `-32053 world_exists`,
+`-32054 world_error` (malformed path, writing through a non-container, a non-object root; `data.path`),
+`-32056 subscription_not_found`, `-32055 limit_reached` (64 worlds, 256 subscriptions).
+
+NPC world tools: `read_world_state(path)` reads within `worldReadable` (keys match case-insensitively; large values
+are shortened); `update_world_state(path, value)` writes within `worldWritable`, keeping the type already stored
+(a number stays a number). Mistakes come back to the model as error outputs that name valid paths.
+
+A Swift host can share a `WorldState` it already owns: `try gameExtension.addWorld(world, id: "main")`.
+
+### `content/generate`
+
+`{"prompt", "schema", "instructions"?, "context"?, "tools"?, "toolTimeoutSeconds"?, "temperature"?, "model"?}` →
+`{"content": <JSON>, "warnings"?}`. Generates items, quests, rumors or loot matching a
+[JSON Schema](#json-schema-support); keys come back in schema order. Keep schemas flat and put guidance in property
+descriptions. ~0.9–1.5 s on device. Invalid schemas fail with `-32007`.
+
+## 7. Messages from the bridge
 
 ### `session/event` (notification)
 
@@ -341,7 +595,40 @@ params instead of `session` (e.g. `"npc": "gorm"`).
 The bridge no longer needs the output of `tool/call` `id` (timeout, cancelled or finished turn). Stop the action
 if you can; any response you still send is ignored.
 
-## 7. Errors
+### `npc/event` (notification)
+
+Sent only for `npc/talk` requests with `"stream": true`. Same envelope as `session/event`, with `npc` instead of `session`:
+
+```json
+{"jsonrpc": "2.0", "method": "npc/event",
+ "params": {"npc": "gorm", "requestId": 7, "event": {"type": "lineDelta", "delta": " iron swords"}}}
+```
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `emotion` | `emotion` | the NPC's emotion, sent as soon as the model has chosen it (before most of the line) so a portrait can react early; a later one replaces it |
+| `lineDelta` | `delta` | text to append to the displayed line (typewriter effect) |
+| `lineReset` | `line` | replace the displayed line (the model rewrote it, or a fallback line replaced a blocked one) |
+| `toolCallStarted` | `call`, `execution` (`"client"` or `"local"`) | a tool call began (`local`: built-in world and memory tools) |
+| `toolCallCompleted` | `record` | a tool finished |
+
+By the time the response arrives, the deltas and resets add up exactly to `result.line`.
+
+### `world/changed` (notification)
+
+Sent for each `world/subscribe` subscription whose path is at, inside or above a changed path:
+
+```json
+{"jsonrpc": "2.0", "method": "world/changed",
+ "params": {"world": "village", "subscription": "sub1", "path": "player.gold", "oldValue": 60, "newValue": 45}}
+```
+
+`oldValue` is omitted when the value was created and `newValue` when it was removed (a JSON `null` value is sent as
+`null`). A merge patch sends one notification per changed leaf. Changes made by NPC tools (`update_world_state`)
+arrive while the turn runs, before its `npc/talk` response; changes from `world/*` requests arrive before their
+response.
+
+## 8. Errors
 
 Error responses follow JSON-RPC: `{"code": int, "message": string, "data": {"code": string, …}}`.
 `data.code` is a stable string — prefer it over the number.
@@ -370,10 +657,17 @@ Error responses follow JSON-RPC: `{"code": int, "message": string, "data": {"cod
 | -32022 | `session_limit` | too many sessions (`data.limit`, default 64) |
 | -32023 | `shut_down` | after `shutdown` / destroy |
 | -32024 | `timeout` | `oam_call_blocking` timed out (the request was cancelled) |
+| -32050 | `npc_not_found` | `data.npc` |
+| -32051 | `npc_exists` | `npc/create` / `npc/restore` with an id in use |
+| -32052 | `world_not_found` | `data.world` |
+| -32053 | `world_exists` | `world/create` with an id in use |
+| -32054 | `world_error` | a world path or value was rejected; `data.world`, `data.path` |
+| -32055 | `limit_reached` | too many NPCs (128), worlds (64) or subscriptions (256); `data.limit` |
+| -32056 | `subscription_not_found` | `data.subscription` |
 
-Extensions use codes in -32050…-32099 for their own errors.
+Codes -32050…-32056 belong to the game methods; other extensions use -32057…-32099.
 
-## 8. Tool definitions
+## 9. Tool definitions
 
 ```json
 {"name": "open_gate",
@@ -402,7 +696,7 @@ with `minimum`/`maximum`, `boolean`, `array` with `items`/`minItems`/`maxItems`,
 `format`, `minLength`, `multipleOf`, …) are added to the description the model sees and reported as warnings.
 Enum-constrained decisions are fast (~1.2 s) and reliable.
 
-## 9. Scripted model
+## 10. Scripted model
 
 `"model": {"type": "scripted", "steps": [...], "fallback"?: step}` replaces the on-device model with a
 deterministic script — for engine development and CI without Apple Intelligence. Everything else (streaming, tool
@@ -421,63 +715,80 @@ the next step; a tool round takes one step and the answer another.
 When the steps run out, `fallback` (default `{"text": "(script exhausted)"}`) is used. `"model": "scripted"` is an
 empty script. Hosts can disable scripted models (`BridgeConfiguration.allowsScriptedModels`).
 
-## 10. Extending the protocol (adding methods)
+## 11. Extending the protocol (adding methods)
 
-The engine is a method registry; game-specific methods (`npc/*`, `decision/*`, `world/*`) plug in as a
-`BridgeExtension` (Swift):
+The engine is a method registry; method sets plug in as a `BridgeExtension` (Swift). The game methods are one
+(`Sources/OpenAppleModelsBridge/Game/`); this sketch adds a hypothetical quest narrator:
 
 ```swift
 import OpenAppleModels
 import OpenAppleModelsBridge
 import Synchronization
 
-final class NPCMethods: BridgeExtension {
-    private let npcs = Mutex<[String: Agent]>([:])
+final class QuestMethods: BridgeExtension {
+    private let quests = Mutex<[String: Agent]>([:])
 
     func register(in registry: inout BridgeMethodRegistry, engine: BridgeEngine) {
         // Fast methods return .result — they run in arrival order.
-        registry.register("npc/create") { [self] request in
-            let id = try request.params.string("npc")
+        registry.register("quest/create") { [self] request in
+            let id = try request.params.string("quest")
             let tools = try request.params["tools"].map { value throws(BridgeError) in
                 try BridgeCoding.tools(from: value, defaultTimeout: .seconds(60)).tools
             } ?? []
             let model = try request.engine.makeModel(BridgeCoding.modelSpec(request.params["model"]))
-            let agent = try Agent(model: model, instructions: try request.params.optionalString("persona"), tools: tools)
-            npcs.withLock { $0[id] = agent }
-            return .result(["npc": .string(id)])
+            let agent = try Agent(model: model, instructions: try request.params.optionalString("instructions"), tools: tools)
+            quests.withLock { $0[id] = agent }
+            return .result(["quest": .string(id)])
         }
         // Slow methods do their order-sensitive part now and return .deferred.
-        registry.register("npc/say") { [self] request in
-            let id = try request.params.string("npc")
-            guard let agent = npcs.withLock({ $0[id] }) else {
-                throw BridgeError(code: -32050, name: "npc_not_found", message: "No NPC '\(id)'.")
+        registry.register("quest/narrate") { [self] request in
+            let id = try request.params.string("quest")
+            guard let agent = quests.withLock({ $0[id] }) else {
+                throw BridgeError(code: -32090, name: "quest_not_found", message: "No quest '\(id)'.")
             }
             let run = agent.run(try request.params.string("text"), policy: ToolPolicy(choice: .required))
             let stream = try request.params.optionalBool("stream") ?? false
             return .deferred {
-                // Streams "npc/event" notifications and routes client tools through tool/call.
-                let response = try await request.drive(run, stream: stream, context: ["npc": .string(id)], eventMethod: "npc/event")
-                var result: JSONObject = ["npc": .string(id)]
+                // Streams "quest/event" notifications and routes client tools through tool/call.
+                let response = try await request.drive(run, stream: stream, context: ["quest": .string(id)], eventMethod: "quest/event")
+                var result: JSONObject = ["quest": .string(id)]
                 for (key, value) in BridgeCoding.json(response) { result[key] = value }
                 return .object(result)
             }
         }
     }
 
-    func shutdown() async { npcs.withLock { $0.removeAll() } }
+    // Listed in initialize's capabilities.notifications.
+    var notificationMethods: [String] { ["quest/event"] }
+
+    func shutdown() async { quests.withLock { $0.removeAll() } }
 }
 
-let engine = BridgeEngine(configuration: BridgeConfiguration(extensions: [NPCMethods()])) { line in print(line) }
+// A Swift host can plug it into its own engine…
+let engine = BridgeEngine(configuration: BridgeConfiguration(extensions: [GameExtension(), QuestMethods()])) { line in print(line) }
 ```
+
+…and to ship it with **every transport** (the `oam stdio` CLI and the C ABI both use the default configuration),
+put the extension in the `OpenAppleModelsBridge` module and return a fresh instance from
+`BridgeConfiguration.standardExtensions()`:
+
+```swift
+// In Sources/OpenAppleModelsBridge/BridgeConfiguration.swift (edit the existing function):
+public static func standardExtensions() -> [any BridgeExtension] {
+    [GameExtension(), QuestMethods()]
+}
+```
+
+Hosts that want only the built-in methods pass `extensions: []`.
 
 Rules of thumb:
 
 * **Handlers run one at a time, in arrival order.** Validate and do order-sensitive work in the handler; return
   `.deferred { … }` for anything that awaits the model or other turns. Awaiting a turn inside a handler blocks
   every later request.
-* Use `BridgeSession.schedule { … }` (or your own queue) for per-object ordering; start `Agent.run` in the handler
-  so turn order equals arrival order.
-* Throw `BridgeError` for protocol errors (`.invalidParams`, custom codes in -32050…-32099 with a `data.code`
+* Use `BridgeSession.schedule { … }` (or your own queue, like the game methods' per-NPC queue) for per-object
+  ordering; start `Agent.run` in the handler so turn order equals arrival order.
+* Throw `BridgeError` for protocol errors (`.invalidParams`, custom codes in -32057…-32099 with a `data.code`
   string); any other error (e.g. `AgentError`) is mapped automatically.
 * Reuse `BridgeParams` accessors (typed, with messages naming the parameter), `BridgeCoding` (tool definitions,
   tool choice/policy, schemas, transcripts, and the `json(_:)` encoders for responses, records, steps and events)
@@ -485,4 +796,7 @@ Rules of thumb:
 * Don't keep a strong reference to the engine in the extension (the engine owns its extensions);
   use `request.engine`.
 * Extensions are registered after the built-ins and may override them; `engine.register(_:_:)` adds methods at runtime.
-* Document new methods in this file and add them to the tests with the scripted model.
+* Name event notifications `<namespace>/event` with the same `{…context, requestId, event}` params as
+  `session/event` (that is what `drive` sends), so bindings route them by `requestId` without changes.
+* Document new methods in this file and add them to the tests with the scripted model
+  (`Tests/OpenAppleModelsBridgeTests/ExtensionTests.swift` shows the pattern).

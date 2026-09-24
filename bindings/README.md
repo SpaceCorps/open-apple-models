@@ -13,6 +13,10 @@ run `oam stdio` instead and exchange the same messages over stdin/stdout.
 | `python/` | `open_apple_models.py` (ctypes, asyncio-friendly), `example.py`, `test_bridge.py` |
 | `unity/` | `OpenAppleModels.cs` — P/Invoke wrapper for Unity (macOS and iOS) and plain .NET |
 
+Besides raw agent sessions, every binding wraps the **game methods** (protocol section 6): NPCs with personas,
+memory and save states (`npc/*`), enum-constrained decisions (`decision/*`), a shared world-state blackboard with
+change notifications (`world/*`) and schema-shaped content (`content/generate`).
+
 Requirements: macOS / iOS / visionOS 27 with Apple Intelligence for the real model. Every binding also works with
 the **scripted model** (`"model": {"type": "scripted", ...}`), so you can develop and run CI anywhere the library
 loads, without Apple Intelligence.
@@ -101,7 +105,31 @@ up on the call (timeout or cancelled turn). The static callback is marked `[Mono
 Outside Unity the same file compiles for plain .NET (call `Pump()` yourself or pass `dispatchOnCallbackThread: true`).
 
 Guardrails can reject violent game content (`OamException.Name == "guardrail_violation"`); catch it and show a
-fallback line.
+fallback line. NPCs do this for you (`isFallback` in the turn).
+
+NPCs, world state and decisions:
+
+```csharp
+bridge.RegisterTool("check_inventory", "Look up stock and price of an item.",
+    Json.Parse(@"{""type"":""object"",""properties"":{""item"":{""type"":""string""}},""required"":[""item""]}"),
+    call => shop.Lookup((string)call.Arguments["item"]));        // call.Npc tells which NPC asked
+
+var world = await bridge.CreateWorldAsync(new Dictionary<string, object> {
+    ["player"] = new Dictionary<string, object> { ["name"] = "Aria", ["gold"] = 60 } }, world: "village");
+await world.SubscribeAsync(change => hud.Refresh((string)change["path"]), path: "quests");
+
+var gorm = await bridge.CreateNpcAsync(
+    new Dictionary<string, object> { ["name"] = "Gorm", ["role"] = "the village blacksmith", ["personality"] = "Gruff but fair." },
+    tools: new[] { "check_inventory" }, world: world.Id, npc: "gorm",
+    options: new Dictionary<string, object> { ["groundingTool"] = "check_inventory", ["worldContextPaths"] = new List<object> { "player" } });
+
+var turn = await gorm.TalkAsync("Got any iron swords?", onLine: text => subtitle.text = text, onEmotion: portrait.Show);
+ShowChoices((List<object>)turn["playerOptions"]);
+var save = Json.Serialize(await gorm.StateAsync());               // store with the game save; RestoreNpcAsync(Json.Parse(save))
+
+var decision = await bridge.DecideAsync("The goblin has 3 HP left.", new object[] { "attack", "flee", "beg" },
+    actor: "gorm", fallbackOptionId: "flee");
+```
 
 ## Python
 
@@ -128,13 +156,24 @@ async def main():
                                    on_text=lambda d: print(d, end="", flush=True))
         print("\n", reply["toolCalls"])
 
+        # Game methods: an NPC with a persona, world state and a grounding tool.
+        world = await bridge.create_world({"player": {"name": "Aria", "gold": 60}}, world="village")
+        smith = await bridge.create_npc({"name": "Gorm", "role": "the village blacksmith"},
+                                        tools=["check_inventory"], world=world.id,
+                                        options={"groundingTool": "check_inventory"})
+        turn = await smith.talk("Got any iron swords?", on_line=print, on_emotion=print)
+        print(turn["emotion"], turn["line"], turn["playerOptions"])
+        save = await smith.state()                       # restore with bridge.restore_npc(save)
+        decision = await bridge.decide("A goblin sees the player.", ["attack", "flee"], actor=smith.id, fallback="flee")
+
 asyncio.run(main())
 ```
 
 The library is found through `Bridge(library=...)`, `OAM_LIBRARY`, `.build/release`, `.build/debug`, then the
 system path. Messages arrive on a bridge thread and are handed to the asyncio loop; tool handlers (sync or async)
 run on the loop and may raise `ToolError` to report a failure to the model. `bridge.call_blocking(method, params)`
-is a synchronous helper for simple calls (not for sessions with tools).
+is a synchronous helper for simple calls (not for sessions with tools). Close bridges (or use `async with`); an
+unclosed bridge is kept alive, never garbage collected under the native callback, and destroyed at interpreter exit.
 
 ## Godot
 
@@ -160,8 +199,11 @@ bridge per game instance, and call `oam_bridge_destroy` in `ShutdownModule` or t
 ## Writing a new binding
 
 1. Load the library, declare the six functions from the header.
-2. Pass a callback that **copies** the line and queues it; never do heavy work or throw in it.
-3. Keep a table `request id -> future/callback`; route responses by `id`, `session/event` by `params.requestId`.
+2. Pass a callback that **copies** the line and queues it; never do heavy work or throw in it. Keep the callback
+   (and whatever `user_data` points to) alive until `oam_bridge_destroy` returns — garbage-collected runtimes must
+   pin it (static delegate + `GCHandle` in C#, a module-level registry in Python).
+3. Keep a table `request id -> future/callback`; route responses by `id`, `session/event` and `npc/event` by
+   `params.requestId`, and `world/changed` by `params.subscription`.
 4. Answer `tool/call` requests (id `t-<n>`) with `{"output": …}` or `{"output": "...", "isError": true}`; stop work on
    `tool/cancel`.
 5. On shutdown call `oam_bridge_destroy` (it waits for an in-flight callback; nothing arrives afterwards) and fail

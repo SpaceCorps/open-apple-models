@@ -7,8 +7,9 @@
 // Setup (Unity):
 //   * macOS editor/standalone: put libOpenAppleModelsFFI.dylib in Assets/Plugins/macOS
 //     (build: swift build -c release --product OpenAppleModelsFFI).
-//   * iOS: add the OpenAppleModelsFFI XCFramework (static) to Assets/Plugins/iOS; calls
-//     go through [DllImport("__Internal")]. See bindings/README.md.
+//   * iOS: add OpenAppleModelsFFI.xcframework (a dynamic framework; build it with Xcode) to
+//     Assets/Plugins/iOS and embed it; calls go through [DllImport("__Internal")].
+//     See bindings/README.md.
 //   * Add an OamBridgeRunner component (or call bridge.Pump() from your own Update) so
 //     messages, results and tool calls are handled on the main thread.
 //
@@ -19,6 +20,15 @@
 //   var guard = await bridge.CreateSessionAsync("You are a castle guard.", new[] { "open_gate" },
 //       options: new Dictionary<string, object> { ["toolChoice"] = "required" });
 //   var result = await guard.RespondAsync("Open the north gate!", onText: delta => subtitle.text += delta);
+//
+// Game methods (NPCs, decisions, world state, content) have typed helpers:
+//
+//   var world = await bridge.CreateWorldAsync(Json.Parse("{\"player\":{\"name\":\"Aria\",\"gold\":60}}") as Dictionary<string, object>);
+//   var gorm = await bridge.CreateNpcAsync(new Dictionary<string, object> { ["name"] = "Gorm", ["role"] = "the village blacksmith" },
+//       tools: new[] { "check_inventory" }, world: world.Id,
+//       options: new Dictionary<string, object> { ["groundingTool"] = "check_inventory" });
+//   var turn = await gorm.TalkAsync("Got any iron swords?", onLine: text => subtitle.text = text, onEmotion: portrait.Show);
+//   var decision = await bridge.DecideAsync("The goblin has 3 HP left.", new object[] { "attack", "flee", "beg" }, actor: "gorm");
 //
 // Outside Unity (plain .NET) everything works the same; call Pump() from your loop, or
 // construct with dispatchOnCallbackThread: true to handle messages on the bridge thread.
@@ -129,8 +139,10 @@ namespace OpenAppleModels
         public string Id { get; internal set; }
         public string Name { get; internal set; }
         public Dictionary<string, object> Arguments { get; internal set; }
-        /// <summary>The session (or NPC etc.) the call belongs to.</summary>
+        /// <summary>The session the call belongs to (null for NPC, decision and content calls).</summary>
         public string Session { get; internal set; }
+        /// <summary>The NPC whose turn made the call (npc/talk), or null.</summary>
+        public string Npc { get; internal set; }
         /// <summary>The id of the request whose turn made the call.</summary>
         public object RequestId { get; internal set; }
         /// <summary>The raw tool/call params.</summary>
@@ -172,7 +184,16 @@ namespace OpenAppleModels
         private void Send(Dictionary<string, object> result)
         {
             if (Interlocked.Exchange(ref _answered, 1) == 1) return;
-            _bridge.SendMessage(new Dictionary<string, object> { ["jsonrpc"] = "2.0", ["id"] = _rpcId, ["result"] = result });
+            _bridge.ForgetCall(_rpcId);
+            if (_bridge.IsDisposed) return;  // a late answer after Dispose has nowhere to go
+            try
+            {
+                _bridge.SendMessage(new Dictionary<string, object> { ["jsonrpc"] = "2.0", ["id"] = _rpcId, ["result"] = result });
+            }
+            catch (ObjectDisposedException)
+            {
+                // Disposed concurrently; the bridge no longer needs the output.
+            }
         }
     }
 
@@ -188,6 +209,7 @@ namespace OpenAppleModels
         private readonly object _lock = new object();
         private readonly Dictionary<string, TaskCompletionSource<object>> _pending = new Dictionary<string, TaskCompletionSource<object>>();
         private readonly Dictionary<string, Action<Dictionary<string, object>>> _eventHandlers = new Dictionary<string, Action<Dictionary<string, object>>>();
+        private readonly Dictionary<string, Action<Dictionary<string, object>>> _worldHandlers = new Dictionary<string, Action<Dictionary<string, object>>>();
         private readonly Dictionary<string, RegisteredTool> _tools = new Dictionary<string, RegisteredTool>();
         private readonly Dictionary<string, ToolReply> _openCalls = new Dictionary<string, ToolReply>();
         private readonly bool _dispatchOnCallbackThread;
@@ -362,11 +384,17 @@ namespace OpenAppleModels
         /// <summary>Definitions for session/create's "tools" (all registered tools when no names are given).</summary>
         public List<object> ToolDefinitions(params string[] names)
         {
+            if (names != null && names.Length > 0) return DefinitionsOf(names);
+            lock (_lock) return DefinitionsOf(new List<string>(_tools.Keys));
+        }
+
+        /// <summary>Definitions of exactly the named tools (an empty list gives no tools).</summary>
+        internal List<object> DefinitionsOf(IEnumerable<string> names)
+        {
             var result = new List<object>();
             lock (_lock)
             {
-                IEnumerable<string> selected = names != null && names.Length > 0 ? (IEnumerable<string>)names : new List<string>(_tools.Keys);
-                foreach (var name in selected)
+                foreach (var name in names)
                 {
                     if (!_tools.TryGetValue(name, out var tool)) throw new KeyNotFoundException("Unknown tool " + name);
                     var definition = new Dictionary<string, object>
@@ -399,13 +427,119 @@ namespace OpenAppleModels
             var parameters = new Dictionary<string, object>();
             if (session != null) parameters["session"] = session;
             if (instructions != null) parameters["instructions"] = instructions;
-            if (tools != null) parameters["tools"] = ToolDefinitions(new List<string>(tools).ToArray());
+            if (tools != null) parameters["tools"] = DefinitionsOf(tools);
             if (options != null) parameters["options"] = options;
             if (model != null) parameters["model"] = model;
             if (history != null) parameters["history"] = history;
             var result = (Dictionary<string, object>)await RequestAsync("session/create", parameters).ConfigureAwait(false);
             return new OamSession(this, (string)result["session"]);
         }
+
+
+        // ---- NPCs, decisions, world state, content (docs/PROTOCOL.md section 6) -------------
+
+        /// <summary>Creates an NPC. <paramref name="persona"/> needs at least "name";
+        /// <paramref name="tools"/> are names of registered tools; <paramref name="world"/> is a world id;
+        /// <paramref name="options"/> are NPC options such as "groundingTool" or "replyFormat".</summary>
+        public async Task<OamNpc> CreateNpcAsync(Dictionary<string, object> persona, IEnumerable<string> tools = null,
+            string world = null, Dictionary<string, object> options = null, Dictionary<string, object> memory = null,
+            object model = null, string npc = null)
+        {
+            var parameters = new Dictionary<string, object> { ["persona"] = persona };
+            if (npc != null) parameters["npc"] = npc;
+            if (tools != null) parameters["tools"] = DefinitionsOf(tools);
+            if (world != null) parameters["world"] = world;
+            if (options != null) parameters["options"] = options;
+            if (memory != null) parameters["memory"] = memory;
+            if (model != null) parameters["model"] = model;
+            var result = (Dictionary<string, object>)await RequestAsync("npc/create", parameters).ConfigureAwait(false);
+            return new OamNpc(this, (string)result["npc"]);
+        }
+
+        /// <summary>Rebuilds an NPC from <see cref="OamNpc.StateAsync"/>. Its id, tools, options and world
+        /// come from the save; the model does not (pass it unless it is the system model). For other
+        /// overrides send "npc/restore" with RequestAsync.</summary>
+        public async Task<OamNpc> RestoreNpcAsync(object state, string npc = null, object model = null)
+        {
+            var parameters = new Dictionary<string, object> { ["state"] = state };
+            if (npc != null) parameters["npc"] = npc;
+            if (model != null) parameters["model"] = model;
+            var result = (Dictionary<string, object>)await RequestAsync("npc/restore", parameters).ConfigureAwait(false);
+            return new OamNpc(this, (string)result["npc"]);
+        }
+
+        /// <summary>A handle for an existing NPC (no request is sent).</summary>
+        public OamNpc Npc(string id) => new OamNpc(this, id);
+
+        /// <summary>Picks one option; the result's "optionID" is the chosen id. <paramref name="options"/> are id
+        /// strings or {"id", "description"} dictionaries; <paramref name="actor"/> is a persona dictionary or an
+        /// NPC id; <paramref name="fallbackOptionId"/> is returned (with "isFallback") when guardrails block.</summary>
+        public async Task<Dictionary<string, object>> DecideAsync(string situation, IEnumerable<object> options,
+            object actor = null, object context = null, IEnumerable<string> tools = null, string toolChoice = null,
+            string fallbackOptionId = null, object model = null)
+        {
+            var parameters = new Dictionary<string, object> { ["situation"] = situation, ["options"] = new List<object>(options) };
+            if (actor != null) parameters["actor"] = actor;
+            if (context != null) parameters["context"] = context;
+            if (tools != null) parameters["tools"] = DefinitionsOf(tools);
+            if (toolChoice != null) parameters["toolChoice"] = ToolChoiceValue(toolChoice);
+            if (fallbackOptionId != null) parameters["fallbackOptionID"] = fallbackOptionId;
+            if (model != null) parameters["model"] = model;
+            return (Dictionary<string, object>)await RequestAsync("decision/decide", parameters).ConfigureAwait(false);
+        }
+
+        /// <summary>Several independent decisions (raw decision/decide params each). Returns one entry per
+        /// request, in order: a decision dictionary, or {"error": {...}}.</summary>
+        public async Task<List<object>> DecideManyAsync(IEnumerable<Dictionary<string, object>> requests,
+            int? maxConcurrency = null, object model = null)
+        {
+            var parameters = new Dictionary<string, object> { ["requests"] = new List<object>(requests) };
+            if (maxConcurrency.HasValue) parameters["maxConcurrency"] = maxConcurrency.Value;
+            if (model != null) parameters["model"] = model;
+            var result = (Dictionary<string, object>)await RequestAsync("decision/decideMany", parameters).ConfigureAwait(false);
+            return (List<object>)result["results"];
+        }
+
+        /// <summary>Generates JSON matching <paramref name="schema"/> (items, quests, rumors…) and returns it.</summary>
+        public async Task<object> GenerateAsync(string prompt, object schema, string instructions = null,
+            object context = null, IEnumerable<string> tools = null, object model = null)
+        {
+            var parameters = new Dictionary<string, object> { ["prompt"] = prompt, ["schema"] = schema };
+            if (instructions != null) parameters["instructions"] = instructions;
+            if (context != null) parameters["context"] = context;
+            if (tools != null) parameters["tools"] = DefinitionsOf(tools);
+            if (model != null) parameters["model"] = model;
+            var result = (Dictionary<string, object>)await RequestAsync("content/generate", parameters).ConfigureAwait(false);
+            return result["content"];
+        }
+
+        /// <summary>Creates a shared JSON world state (an object).</summary>
+        public async Task<OamWorld> CreateWorldAsync(Dictionary<string, object> state = null, string world = null)
+        {
+            var parameters = new Dictionary<string, object>();
+            if (world != null) parameters["world"] = world;
+            if (state != null) parameters["state"] = state;
+            var result = (Dictionary<string, object>)await RequestAsync("world/create", parameters).ConfigureAwait(false);
+            return new OamWorld(this, (string)result["world"]);
+        }
+
+        /// <summary>A handle for an existing world (no request is sent).</summary>
+        public OamWorld World(string id) => new OamWorld(this, id);
+
+        internal void SetWorldHandler(string subscription, Action<Dictionary<string, object>> handler)
+        {
+            lock (_lock)
+            {
+                if (handler == null) _worldHandlers.Remove(subscription);
+                else _worldHandlers[subscription] = handler;
+            }
+        }
+
+        /// <summary>"auto", "none" and "required" pass through; anything else names a tool.</summary>
+        internal static object ToolChoiceValue(string toolChoice) =>
+            toolChoice == "auto" || toolChoice == "none" || toolChoice == "required"
+                ? (object)toolChoice
+                : new Dictionary<string, object> { ["tool"] = toolChoice };
 
         // ---- dispatch ----------------------------------------------------------------------
 
@@ -438,6 +572,12 @@ namespace OpenAppleModels
                     ToolReply reply;
                     lock (_lock) { if (_openCalls.TryGetValue(Convert.ToString(rpcId, CultureInfo.InvariantCulture), out reply)) _openCalls.Remove(Convert.ToString(rpcId, CultureInfo.InvariantCulture)); }
                     reply?.MarkCancelled();
+                }
+                else if (method == "world/changed" && parameters.TryGetValue("subscription", out var subscription) && subscription is string subscriptionId)
+                {
+                    Action<Dictionary<string, object>> handler;
+                    lock (_lock) _worldHandlers.TryGetValue(subscriptionId, out handler);
+                    try { handler?.Invoke(parameters); } catch (Exception thrown) { Log("world handler threw: " + thrown); }
                 }
                 else if (parameters.TryGetValue("requestId", out var requestId) && requestId is string key)
                 {
@@ -474,6 +614,7 @@ namespace OpenAppleModels
                 Name = call != null && call.TryGetValue("name", out var name) ? name as string : null,
                 Arguments = (call != null && call.TryGetValue("arguments", out var args) ? args as Dictionary<string, object> : null) ?? new Dictionary<string, object>(),
                 Session = parameters.TryGetValue("session", out var session) ? session as string : null,
+                Npc = parameters.TryGetValue("npc", out var npc) ? npc as string : null,
                 RequestId = parameters.TryGetValue("requestId", out var requestId) ? requestId : null,
                 Params = parameters,
             };
@@ -491,6 +632,12 @@ namespace OpenAppleModels
             }
             try { tool.Handler(toolCall, reply); }
             catch (Exception error) { reply.Error(error.Message); }
+        }
+
+        /// <summary>Drops the bookkeeping for an answered tool call.</summary>
+        internal void ForgetCall(object rpcId)
+        {
+            lock (_lock) _openCalls.Remove(Convert.ToString(rpcId, CultureInfo.InvariantCulture));
         }
 
         private static void Log(string message)
@@ -516,6 +663,7 @@ namespace OpenAppleModels
                 pending = new List<TaskCompletionSource<object>>(_pending.Values);
                 _pending.Clear();
                 _eventHandlers.Clear();
+                _worldHandlers.Clear();
                 _openCalls.Clear();
             }
             foreach (var completion in pending)
@@ -542,12 +690,7 @@ namespace OpenAppleModels
         {
             var parameters = new Dictionary<string, object> { ["session"] = Id, ["prompt"] = prompt };
             if (schema != null) parameters["schema"] = schema;
-            if (toolChoice != null)
-            {
-                parameters["toolChoice"] = toolChoice == "auto" || toolChoice == "none" || toolChoice == "required"
-                    ? (object)toolChoice
-                    : new Dictionary<string, object> { ["tool"] = toolChoice };
-            }
+            if (toolChoice != null) parameters["toolChoice"] = OamBridge.ToolChoiceValue(toolChoice);
             Action<Dictionary<string, object>> handler = null;
             if (onText != null || onEvent != null)
             {
@@ -582,6 +725,171 @@ namespace OpenAppleModels
 
         public Task<object> SetContextNoteAsync(string note) =>
             Bridge.RequestAsync("session/setContextNote", new Dictionary<string, object> { ["session"] = Id, ["note"] = note });
+
+        /// <summary>Replaces the session's tools (names of registered tools) from the next turn.</summary>
+        public Task<object> SetToolsAsync(IEnumerable<string> tools) =>
+            Bridge.RequestAsync("session/setTools", new Dictionary<string, object>
+            {
+                ["session"] = Id,
+                ["tools"] = Bridge.DefinitionsOf(tools ?? new string[0]),
+            });
+
+        /// <summary>Summarizes older turns into the context note; the task's result is the summary or null.</summary>
+        public async Task<string> CompactAsync(int keepRecentTurns = 2)
+        {
+            var result = (Dictionary<string, object>)await Bridge.RequestAsync("session/compact",
+                new Dictionary<string, object> { ["session"] = Id, ["keepRecentTurns"] = keepRecentTurns }).ConfigureAwait(false);
+            return result.TryGetValue("summary", out var summary) ? summary as string : null;
+        }
+    }
+
+    /// <summary>A non-player character on the bridge (npc/* methods).</summary>
+    public sealed class OamNpc
+    {
+        public OamBridge Bridge { get; }
+        public string Id { get; }
+
+        internal OamNpc(OamBridge bridge, string id)
+        {
+            Bridge = bridge;
+            Id = id;
+        }
+
+        /// <summary>One conversation turn. The result has "line", "emotion", "playerOptions", "endsConversation",
+        /// "toolCalls", "relationship", "isFallback" and "usage". <paramref name="onLine"/> receives the whole line
+        /// shown so far after each change (typewriter), <paramref name="onEmotion"/> the emotion as soon as it is
+        /// known, <paramref name="onEvent"/> every raw npc/event payload; any of them turns on streaming.</summary>
+        public async Task<Dictionary<string, object>> TalkAsync(string line, object context = null,
+            Action<string> onLine = null, Action<string> onEmotion = null,
+            Action<Dictionary<string, object>> onEvent = null, string toolChoice = null)
+        {
+            var parameters = new Dictionary<string, object> { ["npc"] = Id, ["line"] = line ?? "" };
+            if (context != null) parameters["context"] = context;
+            if (toolChoice != null) parameters["toolChoice"] = OamBridge.ToolChoiceValue(toolChoice);
+            Action<Dictionary<string, object>> handler = null;
+            if (onLine != null || onEmotion != null || onEvent != null)
+            {
+                parameters["stream"] = true;
+                var shown = "";
+                handler = notification =>
+                {
+                    if (!(notification.TryGetValue("event", out var e) && e is Dictionary<string, object> evt)) return;
+                    onEvent?.Invoke(evt);
+                    evt.TryGetValue("type", out var typeValue);
+                    switch (typeValue as string)
+                    {
+                        case "emotion":
+                            onEmotion?.Invoke(evt.TryGetValue("emotion", out var emotion) ? emotion as string : "neutral");
+                            break;
+                        case "lineDelta":
+                            shown += evt.TryGetValue("delta", out var delta) ? delta as string : "";
+                            onLine?.Invoke(shown);
+                            break;
+                        case "lineReset":
+                            shown = evt.TryGetValue("line", out var reset) ? reset as string ?? "" : "";
+                            onLine?.Invoke(shown);
+                            break;
+                    }
+                };
+            }
+            return (Dictionary<string, object>)await Bridge.RequestAsync("npc/talk", parameters, handler).ConfigureAwait(false);
+        }
+
+        /// <summary>A short ambient line (fast, no history). Throws on guardrail blocks: skip the bark.</summary>
+        public async Task<string> BarkAsync(string situation = null)
+        {
+            var parameters = new Dictionary<string, object> { ["npc"] = Id };
+            if (situation != null) parameters["situation"] = situation;
+            var result = (Dictionary<string, object>)await Bridge.RequestAsync("npc/bark", parameters).ConfigureAwait(false);
+            return (string)result["line"];
+        }
+
+        /// <summary>The save state (persona, memory, transcript, options, tools, world); store it with
+        /// Json.Serialize and pass it to <see cref="OamBridge.RestoreNpcAsync"/>.</summary>
+        public async Task<object> StateAsync(bool settle = true)
+        {
+            var result = (Dictionary<string, object>)await Bridge.RequestAsync("npc/state",
+                new Dictionary<string, object> { ["npc"] = Id, ["settle"] = settle }).ConfigureAwait(false);
+            return result["state"];
+        }
+
+        /// <summary>Merge-patches persona, options and memory (null values reset fields) and replaces the tools
+        /// (names of registered tools). Applies from the next turn.</summary>
+        public Task<object> UpdateAsync(Dictionary<string, object> persona = null, Dictionary<string, object> options = null,
+            Dictionary<string, object> memory = null, IEnumerable<string> tools = null)
+        {
+            var parameters = new Dictionary<string, object> { ["npc"] = Id };
+            if (persona != null) parameters["persona"] = persona;
+            if (options != null) parameters["options"] = options;
+            if (memory != null) parameters["memory"] = memory;
+            if (tools != null) parameters["tools"] = Bridge.DefinitionsOf(tools);
+            return Bridge.RequestAsync("npc/update", parameters);
+        }
+
+        public Task<object> ResetAsync(bool clearMemory = false) =>
+            Bridge.RequestAsync("npc/reset", new Dictionary<string, object> { ["npc"] = Id, ["clearMemory"] = clearMemory });
+        public Task<object> CancelAsync() => Bridge.RequestAsync("npc/cancel", new Dictionary<string, object> { ["npc"] = Id });
+        public Task<object> DeleteAsync() => Bridge.RequestAsync("npc/delete", new Dictionary<string, object> { ["npc"] = Id });
+    }
+
+    /// <summary>A shared JSON world state (world/* methods). Paths are dot paths such as "player.gold";
+    /// "" is the root.</summary>
+    public sealed class OamWorld
+    {
+        public OamBridge Bridge { get; }
+        public string Id { get; }
+
+        internal OamWorld(OamBridge bridge, string id)
+        {
+            Bridge = bridge;
+            Id = id;
+        }
+
+        /// <summary>The value at <paramref name="path"/>, or null when there is none.</summary>
+        public async Task<object> GetAsync(string path = "")
+        {
+            var result = (Dictionary<string, object>)await Bridge.RequestAsync("world/get",
+                new Dictionary<string, object> { ["world"] = Id, ["path"] = path }).ConfigureAwait(false);
+            return result["value"];
+        }
+
+        /// <summary>Writes a value (null stores JSON null).</summary>
+        public Task<object> SetAsync(string path, object value) =>
+            Bridge.RequestAsync("world/set", new Dictionary<string, object> { ["world"] = Id, ["path"] = path, ["value"] = value });
+
+        /// <summary>Applies a JSON merge patch (null members delete keys).</summary>
+        public Task<object> MergeAsync(Dictionary<string, object> patch, string path = "") =>
+            Bridge.RequestAsync("world/merge", new Dictionary<string, object> { ["world"] = Id, ["path"] = path, ["patch"] = patch });
+
+        public Task<object> RemoveAsync(string path) =>
+            Bridge.RequestAsync("world/remove", new Dictionary<string, object> { ["world"] = Id, ["path"] = path });
+
+        public async Task<object> SnapshotAsync()
+        {
+            var result = (Dictionary<string, object>)await Bridge.RequestAsync("world/snapshot",
+                new Dictionary<string, object> { ["world"] = Id }).ConfigureAwait(false);
+            return result["state"];
+        }
+
+        /// <summary>Calls <paramref name="onChange"/> (on the dispatch thread) with every world/changed
+        /// notification — "path", "oldValue"?, "newValue"? — at, inside or above <paramref name="path"/>.
+        /// Returns the subscription id.</summary>
+        public async Task<string> SubscribeAsync(Action<Dictionary<string, object>> onChange, string path = "")
+        {
+            var result = (Dictionary<string, object>)await Bridge.RequestAsync("world/subscribe",
+                new Dictionary<string, object> { ["world"] = Id, ["path"] = path }).ConfigureAwait(false);
+            var subscription = (string)result["subscription"];
+            Bridge.SetWorldHandler(subscription, onChange);
+            return subscription;
+        }
+
+        public Task<object> UnsubscribeAsync(string subscription)
+        {
+            Bridge.SetWorldHandler(subscription, null);
+            return Bridge.RequestAsync("world/unsubscribe", new Dictionary<string, object> { ["subscription"] = subscription });
+        }
+
+        public Task<object> DeleteAsync() => Bridge.RequestAsync("world/delete", new Dictionary<string, object> { ["world"] = Id });
     }
 
 #if UNITY_5_3_OR_NEWER

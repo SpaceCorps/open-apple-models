@@ -39,12 +39,18 @@ enum CoreMethods {
         }
         let configuration = engine.configuration
         let models: [JSONValue] = configuration.allowsScriptedModels ? ["system", "scripted"] : ["system"]
+        var notifications = ["session/event", "tool/cancel"]
+        for bridgeExtension in configuration.extensions {
+            for method in bridgeExtension.notificationMethods where !notifications.contains(method) {
+                notifications.append(method)
+            }
+        }
         return .result([
             "protocolVersion": .string(BridgeVersion.protocolVersion),
             "server": ["name": .string(BridgeVersion.serverName), "version": .string(BridgeVersion.library)],
             "capabilities": [
                 "methods": .array(engine.methods.map(JSONValue.string)),
-                "notifications": ["session/event", "tool/cancel"],
+                "notifications": .array(notifications.map(JSONValue.string)),
                 "clientRequests": ["tool/call"],
                 "streaming": true,
                 "clientTools": true,

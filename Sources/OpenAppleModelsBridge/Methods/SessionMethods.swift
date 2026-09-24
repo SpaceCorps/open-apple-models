@@ -49,9 +49,10 @@ enum SessionMethods {
         registry.register("session/setTools") { request in
             let session = try request.engine.session(request.params.string("session"))
             let parsed = try BridgeCoding.tools(from: request.params.value("tools"), defaultTimeout: session.toolTimeout)
+            let warnings = parsed.warnings + [toolCountWarning(parsed.tools.count)].compactMap { $0 }
             return session.schedule {
                 try session.agent.setTools(parsed.tools)
-                return ["session": .string(session.id), "warnings": .array(parsed.warnings.map(JSONValue.string))]
+                return ["session": .string(session.id), "warnings": .array(warnings.map(JSONValue.string))]
             }
         }
         registry.register("session/compact") { request in
@@ -93,15 +94,29 @@ enum SessionMethods {
         if let options { warnings += unknownKeys(in: options, allowed: optionKeys) }
         let (configuration, toolTimeout) = try agentConfiguration(from: options, engine: engine)
 
+        let history = try params["history"].map { value throws(BridgeError) in try BridgeCoding.transcript(from: value) }
+        let saved = history.flatMap(BridgeCoding.savedSetup(of:))
+
+        // Instructions and tools default to the ones saved in `history`, so
+        // `{"history": …}` alone resumes a conversation. A key that is present
+        // (even `null` or `[]`) always wins.
+        var instructions = try params.optionalString("instructions")
+        if params.object["instructions"] == nil, let saved { instructions = saved.instructions }
+
         var tools: [AgentTool] = []
         if let value = params["tools"] {
             let parsed = try BridgeCoding.tools(from: value, defaultTimeout: toolTimeout)
             tools = parsed.tools
             warnings += parsed.warnings
+        } else if params.object["tools"] == nil, let saved {
+            let restored = BridgeCoding.clientTools(restoring: saved.tools, defaultTimeout: toolTimeout)
+            tools = restored.tools
+            warnings += restored.warnings
         }
         if case .tool(let name) = configuration.toolPolicy.choice, !tools.contains(where: { $0.name == name }) {
             throw BridgeError.invalidParams("'options.toolChoice' names tool '\(name)', which is not in 'tools'.")
         }
+        if let warning = toolCountWarning(tools.count) { warnings.append(warning) }
 
         let spec = try BridgeCoding.modelSpec(params["model"])
         let model = try engine.makeModel(spec)
@@ -112,10 +127,9 @@ enum SessionMethods {
             }
         }
 
-        let history = try params["history"].map { value throws(BridgeError) in try BridgeCoding.transcript(from: value) }
         let agent = try Agent(
             model: model,
-            instructions: try params.optionalString("instructions"),
+            instructions: instructions,
             tools: tools,
             configuration: configuration,
             history: history)
@@ -187,6 +201,14 @@ enum SessionMethods {
 
     static func unknownKeys(in params: BridgeParams, allowed: Set<String>) -> [String] {
         params.object.keys.filter { !allowed.contains($0) }.map { "Unknown parameter '\(params.path)\($0)' was ignored." }
+    }
+
+    /// Apple recommends about three to five tools per request for the on-device model.
+    static let recommendedMaxTools = 5
+
+    static func toolCountWarning(_ count: Int) -> String? {
+        guard count > recommendedMaxTools else { return nil }
+        return "\(count) tools: Apple recommends at most 3-5 tools per request on-device; narrow them per turn with 'enabledTools'."
     }
 
     static func isValidSessionID(_ id: String) -> Bool {
