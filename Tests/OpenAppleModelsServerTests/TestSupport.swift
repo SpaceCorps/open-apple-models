@@ -5,6 +5,7 @@ import ImageIO
 import OpenAppleModels
 @testable import OpenAppleModelsServer
 import OpenAppleModelsTesting
+import Synchronization
 import Testing
 
 /// Builds servers backed by a scripted model.
@@ -103,6 +104,8 @@ enum SSE {
 final class RawClient {
     let fd: Int32
     private var buffer: [UInt8] = []
+    /// Interim (1xx) statuses skipped by ``readResponse()``.
+    private(set) var interimStatuses: [Int] = []
 
     struct Response {
         var status: Int
@@ -169,6 +172,11 @@ final class RawClient {
         return true
     }
 
+    /// Shuts the socket down in both directions (the peer reads EOF).
+    func disconnect() {
+        shutdown(fd, SHUT_RDWR)
+    }
+
     /// True if the peer closed the connection (reads EOF).
     func isClosedByPeer() -> Bool {
         var chunk = [UInt8](repeating: 0, count: 1024)
@@ -195,9 +203,14 @@ final class RawClient {
             guard let colon = line.firstIndex(of: ":") else { continue }
             headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
-        if status == 100 { return readResponse() }
+        if (100..<200).contains(status) {
+            interimStatuses.append(status)
+            return readResponse()
+        }
         var body = Data()
-        if let length = headers["content-length"].flatMap(Int.init) {
+        if status == 204 || status == 304 {
+            // No body, whatever the headers say.
+        } else if let length = headers["content-length"].flatMap(Int.init) {
             while buffer.count < length { if !fill() { break } }
             body = Data(buffer.prefix(length))
             buffer.removeFirst(min(length, buffer.count))
@@ -230,6 +243,25 @@ final class RawClient {
         }
         return nil
     }
+}
+
+/// Values collected from `@Sendable` callbacks.
+final class Recorder<Element: Sendable>: Sendable {
+    private let values = Mutex<[Element]>([])
+
+    func append(_ value: Element) { values.withLock { $0.append(value) } }
+
+    var all: [Element] { values.withLock { $0 } }
+}
+
+/// Polls `condition` until it holds or `timeout` passes; returns whether it held.
+func eventually(timeout: Duration = .seconds(5), _ condition: () async -> Bool) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    return await condition()
 }
 
 /// A small PNG (8×8 red pixels) as a base64 data URL, generated with ImageIO.

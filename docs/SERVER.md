@@ -46,6 +46,19 @@ configuration.serverTools = [
 ]
 ```
 
+Observe the server's lifecycle with `onStateChange`. If a listener fails while running (iOS
+reclaims the listening sockets of suspended apps, TN2277; a network interface can go away on
+macOS), the server logs an error and recreates it on the same address and port, up to 5 times
+with exponential backoff. If that fails, the server stops: `isRunning` becomes false and
+`waitUntilStopped()` returns.
+
+```swift
+configuration.onStateChange = { state in
+    // .running, .restarting(attempt:reason:), .stopped(reason:) — reason is nil after stop()
+    print("server:", state)
+}
+```
+
 `OpenAIServer.handle(_:)` serves an `HTTPRequest` without sockets. It returns an
 `HTTPResponse`, and streamed responses have a `.stream(HTTPBodyStream)` body. Use it for
 tests or to embed the API in another transport.
@@ -123,7 +136,7 @@ HTTP error status. A failure after streaming has started is sent as
 |---|---|
 | `POST /v1/chat/completions` (also `/chat/completions`) | Chat completions, streaming or not |
 | `GET /v1/models`, `GET /v1/models/{id}` | Models in the OpenAI list format. Aliases are listed with `parent` |
-| `GET /health` | `{"status":"ok","models":{…},"active_requests":…,"queued_requests":…}`. Returns 503 when the default model is unavailable |
+| `GET /health` | `{"status":"ok","models":{…},"active_requests":…,"queued_requests":…}`. Returns 503 with `"status":"unavailable"` and a `reason` (`device_not_eligible`, `apple_intelligence_not_enabled`, `model_not_ready` or `unknown`, the codes the bridge and `oam` use) when the default model is unavailable. Each entry in `models` is `"available"` or `"unavailable: <reason>"` |
 | `OPTIONS *` | CORS preflight for allowed origins |
 
 Unknown paths return `404` with `code: "unknown_url"`. A wrong method returns `405` with an
@@ -133,7 +146,7 @@ Unknown paths return `404` with `code: "unknown_url"`. A wrong method returns `4
 
 | OpenAI | FoundationModels / core |
 |---|---|
-| `system` and `developer` messages | Joined into the agent's instructions. `developer` is treated as `system` |
+| `system` and `developer` messages | Joined into the agent's instructions, wherever they appear (a trailing one after the last `user` message is honoured too). `developer` is treated as `system` |
 | `user` content: a string or `text` and `image_url` parts | `Transcript.Prompt` segments. Images must be `data:` URLs and are decoded with ImageIO into image attachments (vision). Consecutive user messages are merged |
 | `assistant` content | `Transcript.Response` |
 | `assistant` `tool_calls` | `Transcript.ToolCalls` with the **client's ids**. `arguments` is parsed into `GeneratedContent` with key order kept |
@@ -201,18 +214,29 @@ Every error uses OpenAI's envelope, `{"error": {"message", "type", "param", "cod
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `invalid_json`, `invalid_value`, `invalid_type`, `missing_required_parameter`, `invalid_last_message`, `unknown_tool_call_id`, `missing_tool_output`, `duplicate_tool_call_id`, `duplicate_tool_output`, `unknown_tool`, `invalid_schema`, `unsupported_image_url`, `invalid_image`, `malformed_request` | Invalid requests. `param` names the field, for example `messages[2].tool_call_id` |
+| 400 | `invalid_json`, `invalid_value`, `invalid_type`, `missing_required_parameter`, `missing_user_message`, `invalid_last_message`, `unknown_tool_call_id`, `missing_tool_output`, `duplicate_tool_call_id`, `duplicate_tool_output`, `unknown_tool`, `invalid_schema`, `unsupported_image_url`, `invalid_image_url`, `invalid_image` | Invalid requests. `param` names the field, for example `messages[2].tool_call_id` |
+| 400 | `malformed_request` | The HTTP request itself is malformed. The connection is closed |
 | 400 | `context_length_exceeded` | The conversation does not fit the 8192-token context |
 | 400 | `content_filter` | The on-device safety guardrails blocked the input or output |
+| 400 | `unsupported_language` | The model does not support the language of the conversation |
 | 401 | `invalid_api_key` | `apiKey` is set and the Bearer token is missing or wrong |
 | 403 | `origin_not_allowed` | A browser `Origin` that is not in `allowedOrigins` |
 | 404 | `model_not_found` / `unknown_url` | |
 | 405 / 415 | `method_not_allowed` / `unsupported_media_type` | |
 | 413 / 431 | `malformed_request` | The body exceeds `maxRequestBodyBytes`, or the headers exceed `maxHeaderBytes` |
+| 421 | `invalid_host` | The `Host` is not `localhost`, `127.0.0.1`, `[::1]` or in `allowedHosts` (see [Security notes](#security-notes)) |
 | 429 | `rate_limited` | The system rate-limited the model, or the request queue is full. Has `Retry-After` |
 | 500 | `invalid_json_output`, `tool_failed`, … | Server or model failures |
-| 503 | `model_unavailable` | Apple Intelligence is off, the device is not eligible, or the model is still downloading |
+| 501 | `malformed_request` | A `Transfer-Encoding` other than `chunked` |
+| 503 | `model_unavailable` | Apple Intelligence is off, the device is not eligible, or the model is still downloading. The message names the reason: `apple_intelligence_not_enabled`, `device_not_eligible` or `model_not_ready`. Has `Retry-After` |
+| 503 | `busy` | The on-device model is busy with other work. Has `Retry-After` |
+| 503 | `too_many_connections` | `maxConnections` connections are already open. Sent on the new connection, which is then closed. Has `Retry-After` |
+| 503 | `server_overloaded` | Buffered requests would exceed `maxBufferedRequestBytes`. The connection is closed. Has `Retry-After` |
 | 504 | `timeout` | The request (including time spent queued) exceeded `requestTimeout` |
+
+Requests that fail the Host, Origin, route, method, authentication or content-type checks
+(421, 403, 404, 405, 401, 415) are rejected as soon as their head arrives: before any body
+byte is read and without a `100 Continue`. The response has `Connection: close`.
 
 ## Configuration
 
@@ -225,7 +249,10 @@ Every error uses OpenAI's envelope, `{"error": {"message", "type", "param", "cod
 | `serverTools` / `serverInstructions` | `[]` / `nil` | In-process tools, and instructions prepended to every request |
 | `apiKey` | `nil` | Requires `Authorization: Bearer …` on `/v1/*`. `/health` stays open |
 | `allowedOrigins` | `[]` | Browser origins allowed to call the API. `"*"` allows all |
+| `allowedHosts` | `[]` | `Host` names (without port) accepted besides `localhost`, `127.0.0.1` and `[::1]`. Checked on the Unix socket and on a loopback-bound TCP listener; on other interfaces only when set. `"*"` turns the check off |
 | `maxRequestBodyBytes` / `maxHeaderBytes` | 16 MiB / 64 KiB | |
+| `maxConnections` | 64 | Open connections. More get 503 `too_many_connections` and are closed |
+| `maxBufferedRequestBytes` | 64 MiB | Request heads and bodies buffered across all connections, including bodies of requests being processed. Beyond it: 503 `server_overloaded`. Raised to at least `maxRequestBodyBytes + maxHeaderBytes + 256 KiB` |
 | `maxConcurrentRequests` / `maxQueuedRequests` | 4 / 64 | Extra requests queue in FIFO order. When the queue is full: 429 |
 | `requestTimeout` | 120 s | Covers queueing and generation |
 | `idleTimeout` | 30 s | Time allowed to deliver a complete request, and keep-alive idle time. Protects against slowloris |
@@ -233,7 +260,8 @@ Every error uses OpenAI's envelope, `{"error": {"message", "type", "param", "cod
 | `toolPolicy` | `ToolPolicy()` | Round and call budgets for server tools. `choice` and `enabledTools` come from the request |
 | `contextPolicy` | no trimming | An oversized conversation fails like OpenAI does. Enable trimming to drop the oldest turns instead |
 | `retryPolicy` | `.default` | Retries transient model failures that happen before any tool ran |
-| `logger` | `nil` | Receives `ServerLogEntry` (access log, errors) |
+| `logger` | `nil` | Receives `ServerLogEntry` (access log, errors). Control, line-separator and bidi characters from clients are percent-encoded, so requests cannot forge log lines |
+| `onStateChange` | `nil` | Receives `ServerState`: `.running` after start and after a listener restart, `.restarting(attempt:reason:)`, `.stopped(reason:)` |
 
 ## HTTP implementation
 
@@ -246,27 +274,43 @@ The server implements HTTP/1.1 itself on Network.framework:
   - `Content-Length` together with `Transfer-Encoding`, or conflicting lengths → 400.
   - Whitespace before a colon or obsolete line folding → 400.
   - HTTP/1.1 without exactly one `Host` header → 400.
+  - Chunk sizes must be ASCII hex digits (`+2f`, `-0` and non-ASCII digits → 400), with
+    whitespace allowed only before a `;` extension. The version must be `HTTP/` plus ASCII
+    digits.
 - Size limits: a head over the limit → 431, a body over the limit → 413 (checked against
   the declared length before the body is read). Malformed input → 400, then the connection
   closes.
+- Requests are screened as soon as their head is parsed (Host, Origin, route, method,
+  authentication, content type), so unauthenticated or misrouted requests never get their
+  body buffered. The memory held by buffered requests across all connections is capped
+  (`maxBufferedRequestBytes`), as is the number of connections (`maxConnections`).
 - A connection must deliver a complete request within `idleTimeout`, or it is closed
   (slowloris protection).
-- If the client disconnects while its request is being generated, the generation is
-  cancelled and its concurrency slot is freed.
+- The connection keeps reading while a request is handled. If the client disconnects, the
+  generation is cancelled and its concurrency slot is freed, also when pipelined bytes
+  arrived first.
+- 1xx, 204 and 304 responses carry neither `Content-Length` nor a body.
+- A listener that fails while running is recreated on the same address (see
+  [Quick start](#quick-start-swift)).
 
 ## Security notes
 
 - The server binds to `127.0.0.1` by default. If you bind to another interface, set `apiKey`.
   Bearer tokens are compared in constant time.
 - **Browsers:** any request with an `Origin` header outside `allowedOrigins` is rejected
-  with 403. Browsers always send `Origin` on cross-site and same-site POSTs. This blocks:
-  - CSRF from web pages,
-  - DNS-rebinding attacks against the local server.
-
-  A POST also needs `Content-Type: application/json`, which a plain HTML form cannot send.
+  with 403. Browsers always send `Origin` on cross-site and same-site POSTs, which blocks
+  CSRF from web pages. A POST also needs `Content-Type: application/json`, which a plain
+  HTML form cannot send.
+- **DNS rebinding:** a page on an attacker's domain can re-resolve that domain to
+  `127.0.0.1`. The browser then treats requests to the local server as same-origin: it
+  omits `Origin` on GETs, but sends the attacker's domain as `Host`. So when the TCP
+  listener is bound to a loopback address, and always on the Unix socket, requests whose
+  `Host` is not `localhost`, `127.0.0.1` or `[::1]` (any port) or in `allowedHosts` are
+  rejected with 421 `invalid_host`. If you bind to another interface, the `Host` header is
+  only checked when `allowedHosts` is set, so set `apiKey` (and `allowedHosts`).
 - The server never fetches remote URLs. Images must be sent inline as `data:` URLs.
 - The Unix socket is created with mode `0600` (owner only). A non-socket file at the path is
-  never replaced.
+  never replaced or removed.
 - Server tools run in-process with the server's privileges. Validate their arguments like any
   other untrusted input, because the model chooses them.
 

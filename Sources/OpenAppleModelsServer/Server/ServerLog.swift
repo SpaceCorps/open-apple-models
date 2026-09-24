@@ -36,11 +36,40 @@ public struct ServerLogEntry: Sendable, CustomStringConvertible {
 }
 
 /// Forwards log entries to the configured sink, if any.
+///
+/// Messages often quote client input (paths are percent-decoded, header
+/// values may hold control characters), so control, line-separator and
+/// bidi-formatting characters are percent-encoded: a client cannot forge
+/// log lines or restyle a terminal.
 struct ServerLogger: Sendable {
     let sink: (@Sendable (ServerLogEntry) -> Void)?
 
     func log(_ level: ServerLogEntry.Level, _ message: @autoclosure () -> String) {
         guard let sink else { return }
-        sink(ServerLogEntry(level: level, message: message()))
+        sink(ServerLogEntry(level: level, message: Self.escapingControlCharacters(message())))
+    }
+
+    /// `text` with control characters (C0, DEL, C1), line and paragraph
+    /// separators and format characters (such as bidi overrides)
+    /// percent-encoded as UTF-8, e.g. a newline becomes `%0A`.
+    static func escapingControlCharacters(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: needsEscaping) else { return text }
+        var result = ""
+        result.unicodeScalars.reserveCapacity(text.unicodeScalars.count)
+        for scalar in text.unicodeScalars {
+            if needsEscaping(scalar) {
+                for byte in String(scalar).utf8 { result += "%" + (byte < 16 ? "0" : "") + String(byte, radix: 16, uppercase: true) }
+            } else {
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
+    }
+
+    private static func needsEscaping(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator: true
+        default: false
+        }
     }
 }

@@ -23,7 +23,8 @@ struct MappedConversation: Sendable {
 
 /// Maps OpenAI chat `messages` to a FoundationModels transcript.
 ///
-/// - `system` / `developer` → instructions
+/// - `system` / `developer` → instructions, wherever they appear (a trailing
+///   one does not end the conversation)
 /// - `user` → prompts (text and inline images); consecutive user messages merge
 /// - `assistant` content → responses; `tool_calls` → tool calls with the client's ids
 /// - `tool` → tool outputs whose id is the `tool_call_id` they answer
@@ -142,7 +143,9 @@ enum MessageMapper {
             default:
                 throw message.invalid("role", "Invalid role '\(role)': expected 'system', 'developer', 'user', 'assistant' or 'tool'.")
             }
-            lastRole = role
+            // Instructions can appear anywhere (even last) without changing
+            // the turn structure: only conversation turns decide the prompt.
+            if role != "system", role != "developer" { lastRole = role }
         }
         if let batch { throw missingOutputs(batch, param: "messages") }
 

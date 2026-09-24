@@ -29,12 +29,18 @@ public final class OpenAIServer: Sendable {
 
     private let logger: ServerLogger
     private let limiter: ConcurrencyLimiter
+    private let budget: ByteBudget
     private let createdAt = Int(Date().timeIntervalSince1970)
     private let queue = DispatchQueue(label: "open-apple-models.server")
+    /// Lowercased ``ServerConfiguration/allowedHosts``.
+    private let allowedHosts: Set<String>
+    private let tcpHostIsLoopback: Bool
 
     private struct State {
         var listeners: [HTTPListener] = []
         var connections: [Int: HTTPConnection] = [:]
+        /// Connections over ``ServerConfiguration/maxConnections``, being sent a 503.
+        var rejected: [Int: HTTPConnection] = [:]
         var nextConnectionID = 0
         var port: Int?
         var running = false
@@ -43,11 +49,20 @@ public final class OpenAIServer: Sendable {
 
     private let state = Mutex(State())
 
+    /// Connections refused at once without a response when this many are
+    /// already being sent a 503 (a connection flood).
+    private static let maxRejectedConnections = 16
+
     /// Creates a server. Nothing listens until ``start()``; ``handle(_:)`` works right away.
     public init(configuration: ServerConfiguration = ServerConfiguration()) {
         self.configuration = configuration
         logger = ServerLogger(sink: configuration.logger)
         limiter = ConcurrencyLimiter(limit: configuration.maxConcurrentRequests, maxQueued: configuration.maxQueuedRequests)
+        // Always room for one maximal request plus read-ahead.
+        let minimumBudget = max(0, configuration.maxRequestBodyBytes) + max(0, configuration.maxHeaderBytes) + 4 * ConnectionReader.readSize
+        budget = ByteBudget(limit: max(configuration.maxBufferedRequestBytes, minimumBudget))
+        allowedHosts = Set(configuration.allowedHosts.map { $0.lowercased() })
+        tcpHostIsLoopback = Self.isLoopback(configuration.host)
     }
 
     // MARK: Lifecycle
@@ -55,7 +70,8 @@ public final class OpenAIServer: Sendable {
     /// The bound TCP port once started (useful with port `0`), else `nil`.
     public var port: Int? { state.withLock { $0.port } }
 
-    /// Whether ``start()`` succeeded and ``stop()`` has not been called.
+    /// Whether ``start()`` succeeded and the server has not stopped since
+    /// (by ``stop()``, or because a failed listener could not be restarted).
     public var isRunning: Bool { state.withLock { $0.running } }
 
     /// Open client connections.
@@ -70,21 +86,27 @@ public final class OpenAIServer: Sendable {
         }
         guard !alreadyRunning else { throw ServerStartError("The server is already running.") }
 
+        let restartPolicy = HTTPListener.RestartPolicy(
+            attempts: configuration.listenerRestartAttempts, initialDelay: configuration.listenerRestartDelay)
         var listeners: [HTTPListener] = []
         var boundPort: Int?
         do throws(ServerStartError) {
             if let port = configuration.port {
-                let listener = try HTTPListener(host: configuration.host, port: port)
+                let listener = try HTTPListener(host: configuration.host, port: port, restartPolicy: restartPolicy)
                 listeners.append(listener)
                 boundPort = try await listener.start(queue: queue) { [weak self] connection in
                     self?.accept(connection, transport: .tcp)
+                } onEvent: { [weak self, weak listener] event in
+                    if let listener { self?.listenerEvent(event, from: listener) }
                 }
             }
             if let path = configuration.unixSocketPath {
-                let listener = try HTTPListener(unixSocketPath: path)
+                let listener = HTTPListener(unixSocketPath: path, restartPolicy: restartPolicy)
                 listeners.append(listener)
                 _ = try await listener.start(queue: queue) { [weak self] connection in
                     self?.accept(connection, transport: .unixSocket)
+                } onEvent: { [weak self, weak listener] event in
+                    if let listener { self?.listenerEvent(event, from: listener) }
                 }
             }
         } catch {
@@ -97,35 +119,76 @@ public final class OpenAIServer: Sendable {
             throw ServerStartError("Nothing to listen on: set a port or a Unix socket path.")
         }
 
-        state.withLock { state in
+        let stillRunning = state.withLock { state in
+            guard state.running else { return false }
             state.listeners = listeners
             state.port = boundPort
+            return true
         }
-        var endpoints: [String] = []
-        if let boundPort { endpoints.append("http://\(configuration.host.contains(":") ? "[\(configuration.host)]" : configuration.host):\(boundPort)") }
-        if let path = configuration.unixSocketPath { endpoints.append("unix:\(path)") }
-        logger.log(.info, "open-apple-models server listening on \(endpoints.joined(separator: " and ")) (models: \(CompletionPlan.availableModels(configuration)))")
+        guard stillRunning else {
+            // stop() was called while starting.
+            listeners.forEach { $0.cancel() }
+            throw ServerStartError("The server was stopped while starting.")
+        }
+        logger.log(.info, "open-apple-models server listening on \(listeners.map(\.address).map { $0.hasPrefix("unix:") ? $0 : "http://\($0)" }.joined(separator: " and ")) "
+            + "(models: \(CompletionPlan.availableModels(configuration)))")
+        configuration.onStateChange?(.running)
     }
 
     /// Stops listening and closes every connection (cancelling in-flight requests).
     public func stop() {
+        shutDown(reason: nil)
+    }
+
+    /// Stops the server: `reason` is `nil` for ``stop()``, or why a failed
+    /// listener could not be restarted.
+    private func shutDown(reason: String?) {
         let (listeners, connections, waiters) = state.withLock { state in
             defer {
                 state.listeners = []
                 state.connections = [:]
+                state.rejected = [:]
                 state.running = false
                 state.port = nil
                 state.stopWaiters = []
             }
-            return (state.listeners, Array(state.connections.values), state.stopWaiters)
+            return (state.listeners, Array(state.connections.values) + Array(state.rejected.values), state.stopWaiters)
         }
         listeners.forEach { $0.cancel() }
         connections.forEach { $0.cancel() }
         waiters.forEach { $0.resume() }
-        if !listeners.isEmpty { logger.log(.info, "open-apple-models server stopped") }
+        guard !listeners.isEmpty else { return }
+        if let reason {
+            logger.log(.error, "open-apple-models server stopped: \(reason)")
+        } else {
+            logger.log(.info, "open-apple-models server stopped")
+        }
+        configuration.onStateChange?(.stopped(reason: reason))
     }
 
-    /// Suspends until ``stop()`` is called.
+    private func listenerEvent(_ event: HTTPListener.Event, from listener: HTTPListener) {
+        guard state.withLock({ $0.listeners.contains { $0 === listener } }) else { return }
+        switch event {
+        case .failed(let reason, let attempt):
+            logger.log(.error, "listener on \(listener.address) failed: \(reason); restarting it "
+                + "(attempt \(attempt) of \(configuration.listenerRestartAttempts))")
+            configuration.onStateChange?(.restarting(attempt: attempt, reason: reason))
+        case .restarted:
+            logger.log(.info, "listener on \(listener.address) restarted")
+            configuration.onStateChange?(.running)
+        case .gaveUp(let reason):
+            shutDown(reason: "the listener on \(listener.address) failed and could not be restarted: \(reason)")
+        }
+    }
+
+    /// The listeners (for tests).
+    var listeners: [HTTPListener] { state.withLock { $0.listeners } }
+
+    /// Request bytes currently buffered across connections (for tests).
+    var bufferedRequestBytes: Int { budget.usedBytes }
+
+    /// Suspends until the server stops: ``stop()`` was called, or a failed
+    /// listener could not be restarted.
     public func waitUntilStopped() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let running = state.withLock { state in
@@ -147,29 +210,54 @@ public final class OpenAIServer: Sendable {
         for tool in configuration.serverTools where tool.isExternal {
             throw ServerStartError("Server tool '\(tool.name)' is external; server tools need a local handler.")
         }
+        guard configuration.maxConnections > 0 else { throw ServerStartError("maxConnections must be at least 1.") }
+    }
+
+    private enum Acceptance {
+        case serve(HTTPConnection)
+        case reject(HTTPConnection)
+        case refuse
     }
 
     private func accept(_ connection: NWConnection, transport: HTTPTransport) {
         let settings = HTTPConnection.Settings(
             limits: .init(maxHeaderBytes: configuration.maxHeaderBytes, maxBodyBytes: configuration.maxRequestBodyBytes),
-            idleTimeout: configuration.idleTimeout)
-        let accepted: HTTPConnection? = state.withLock { state in
-            guard state.running else { return nil }
+            idleTimeout: configuration.idleTimeout,
+            budget: budget)
+        let acceptance: Acceptance = state.withLock { state in
+            guard state.running else { return .refuse }
+            let atLimit = state.connections.count >= configuration.maxConnections
+            if atLimit, state.rejected.count >= Self.maxRejectedConnections { return .refuse }
             let id = state.nextConnectionID
             state.nextConnectionID += 1
-            let handler = HTTPConnection(id: id, connection: connection, transport: transport, settings: settings, log: logger) { [weak self] request in
-                guard let self else { return OpenAIError.server("The server is shutting down.").response }
-                return await self.handle(request)
+            let handler = HTTPConnection(
+                id: id, connection: connection, transport: transport, settings: settings, log: logger,
+                screen: { [weak self] head in self?.screen(head) },
+                handler: { [weak self] request in
+                    guard let self else { return OpenAIError.server("The server is shutting down.").response }
+                    return await self.handle(request)
+                })
+            if atLimit {
+                state.rejected[id] = handler
+                return .reject(handler)
             }
             state.connections[id] = handler
-            return handler
+            return .serve(handler)
         }
-        guard let accepted else {
+        switch acceptance {
+        case .refuse:
             connection.cancel()
-            return
-        }
-        accepted.start { [weak self] in
-            _ = self?.state.withLock { $0.connections.removeValue(forKey: accepted.id) }
+        case .serve(let accepted):
+            accepted.start { [weak self] in
+                _ = self?.state.withLock { $0.connections.removeValue(forKey: accepted.id) }
+            }
+        case .reject(let rejected):
+            logger.log(.warning, "refusing a connection: \(configuration.maxConnections) connections are open (maxConnections)")
+            let response = OpenAIError(status: 503, message: "Too many open connections (\(configuration.maxConnections)). Retry shortly.",
+                                       type: "server_error", code: "too_many_connections", retryAfter: 1).response
+            rejected.start(rejecting: response) { [weak self] in
+                _ = self?.state.withLock { $0.rejected.removeValue(forKey: rejected.id) }
+            }
         }
     }
 
@@ -179,52 +267,158 @@ public final class OpenAIServer: Sendable {
     /// ``HTTPResponse/Body/stream(_:)`` body of server-sent events.
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
         let start = ContinuousClock.now
-        var response = await route(request)
+        var response: HTTPResponse
+        switch admit(request) {
+        case .rejected(let rejection): response = rejection
+        case .endpoint(let endpoint): response = await serve(endpoint, request)
+        }
         applyCORS(to: &response, for: request)
+        logAccess(request, response, since: start)
+        return response
+    }
+
+    /// Screens a request head as soon as it arrives, before its body is
+    /// read: returns the error response for a request that fails the
+    /// Host, Origin, route, method, authentication or content-type checks.
+    func screen(_ head: HTTPRequest) -> HTTPResponse? {
+        let start = ContinuousClock.now
+        guard case .rejected(var response) = admit(head) else { return nil }
+        applyCORS(to: &response, for: head)
+        logAccess(head, response, since: start)
+        return response
+    }
+
+    private func logAccess(_ request: HTTPRequest, _ response: HTTPResponse, since start: ContinuousClock.Instant) {
         let elapsed = ContinuousClock.now - start
         logger.log(response.status >= 500 ? .warning : .info,
                    "\(request.method) \(request.path) → \(response.status)\(response.isStreaming ? " (stream)" : "") "
                        + elapsed.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))
-        return response
     }
 
-    private func route(_ request: HTTPRequest) async -> HTTPResponse {
+    private enum Endpoint {
+        case preflight
+        case health
+        case listModels
+        case retrieveModel(String)
+        case chatCompletions
+    }
+
+    private enum Admission {
+        case endpoint(Endpoint)
+        case rejected(HTTPResponse)
+    }
+
+    /// Resolves the endpoint and runs every check that does not need the
+    /// body, so they can run before the body is read.
+    private func admit(_ request: HTTPRequest) -> Admission {
+        if let failure = checkHost(request) { return .rejected(failure) }
         if let origin = request.headers["Origin"], !isAllowed(origin: origin) {
-            return OpenAIError(status: 403, message: "Requests from origin '\(origin)' are not allowed. Add it to allowedOrigins to permit browser access.",
-                               type: "invalid_request_error", code: "origin_not_allowed").response
+            return .rejected(OpenAIError(status: 403, message: "Requests from origin '\(origin)' are not allowed. Add it to allowedOrigins to permit browser access.",
+                                         type: "invalid_request_error", code: "origin_not_allowed").response)
         }
         var path = request.path
         while path.count > 1, path.hasSuffix("/") { path.removeLast() }
-        if request.method == "OPTIONS" { return preflight(request) }
+        if request.method == "OPTIONS" { return .endpoint(.preflight) }
 
+        let isRead = request.method == "GET" || request.method == "HEAD"
         switch path {
         case "/health", "/healthz", "/v1/health":
-            guard request.method == "GET" || request.method == "HEAD" else { return methodNotAllowed(request, allow: "GET") }
-            return health()
+            guard isRead else { return .rejected(methodNotAllowed(request, allow: "GET")) }
+            return .endpoint(.health)
         case "/v1/models", "/models":
-            guard request.method == "GET" || request.method == "HEAD" else { return methodNotAllowed(request, allow: "GET") }
-            if let failure = authenticate(request) { return failure }
-            return listModels()
+            guard isRead else { return .rejected(methodNotAllowed(request, allow: "GET")) }
+            if let failure = authenticate(request) { return .rejected(failure) }
+            return .endpoint(.listModels)
         case "/v1/chat/completions", "/chat/completions":
-            guard request.method == "POST" else { return methodNotAllowed(request, allow: "POST") }
-            if let failure = authenticate(request) { return failure }
+            guard request.method == "POST" else { return .rejected(methodNotAllowed(request, allow: "POST")) }
+            if let failure = authenticate(request) { return .rejected(failure) }
             guard Self.isJSON(request.headers["Content-Type"]) else {
-                return OpenAIError(status: 415, message: "Content-Type must be application/json.",
-                                   type: "invalid_request_error", code: "unsupported_media_type").response
+                return .rejected(OpenAIError(status: 415, message: "Content-Type must be application/json.",
+                                             type: "invalid_request_error", code: "unsupported_media_type").response)
             }
-            return await chatCompletions(request)
+            return .endpoint(.chatCompletions)
         default:
             if path.hasPrefix("/v1/models/") || path.hasPrefix("/models/") {
-                guard request.method == "GET" || request.method == "HEAD" else { return methodNotAllowed(request, allow: "GET") }
-                if let failure = authenticate(request) { return failure }
-                return retrieveModel(String(path.split(separator: "/", omittingEmptySubsequences: true).last ?? ""))
+                guard isRead else { return .rejected(methodNotAllowed(request, allow: "GET")) }
+                if let failure = authenticate(request) { return .rejected(failure) }
+                return .endpoint(.retrieveModel(String(path.split(separator: "/", omittingEmptySubsequences: true).last ?? "")))
             }
-            return OpenAIError(status: 404, message: "Unknown request URL: \(request.method) \(request.path). Supported: POST /v1/chat/completions, GET /v1/models, GET /health.",
-                               type: "invalid_request_error", code: "unknown_url").response
+            return .rejected(OpenAIError(status: 404, message: "Unknown request URL: \(request.method) \(request.path). Supported: POST /v1/chat/completions, GET /v1/models, GET /health.",
+                                         type: "invalid_request_error", code: "unknown_url").response)
+        }
+    }
+
+    private func serve(_ endpoint: Endpoint, _ request: HTTPRequest) async -> HTTPResponse {
+        switch endpoint {
+        case .preflight: preflight(request)
+        case .health: health()
+        case .listModels: listModels()
+        case .retrieveModel(let id): retrieveModel(id)
+        case .chatCompletions: await chatCompletions(request)
         }
     }
 
     // MARK: Security
+
+    /// Rejects requests addressed to a host name other than the loopback
+    /// names or ``ServerConfiguration/allowedHosts`` (DNS-rebinding
+    /// protection). Applies on the Unix socket, on a loopback-bound TCP
+    /// listener, and on other TCP listeners when `allowedHosts` is set.
+    private func checkHost(_ request: HTTPRequest) -> HTTPResponse? {
+        switch request.transport {
+        case .direct: return nil
+        case .unixSocket: break
+        case .tcp: guard tcpHostIsLoopback || !allowedHosts.isEmpty else { return nil }
+        }
+        guard !allowedHosts.contains("*"), let host = Self.requestHost(request) else { return nil }
+        let name = Self.hostName(host)
+        if Self.loopbackHostNames.contains(name) || allowedHosts.contains(name) { return nil }
+        return OpenAIError(status: 421, message: "This server does not serve host '\(host)'. Use localhost or add the host to allowedHosts.",
+                           type: "invalid_request_error", code: "invalid_host").response
+    }
+
+    /// Host names always accepted by ``checkHost(_:)``.
+    static let loopbackHostNames: Set<String> = ["localhost", "127.0.0.1", "[::1]"]
+
+    /// The host the request is addressed to: the authority of an
+    /// absolute-form target (which takes precedence, RFC 9112 §3.2.2), else
+    /// the `Host` header. `nil` when there is neither (HTTP/1.0).
+    static func requestHost(_ request: HTTPRequest) -> String? {
+        let target = request.target
+        if !target.hasPrefix("/"), let scheme = target.range(of: "://"), target[..<scheme.lowerBound].allSatisfy(\.isLetter) {
+            let authority = target[scheme.upperBound...].prefix { $0 != "/" && $0 != "?" && $0 != "#" }
+            return String(authority.split(separator: "@", omittingEmptySubsequences: false).last ?? "")
+        }
+        return request.headers["Host"]
+    }
+
+    /// A `Host` value without its port, lowercased (`[::1]:8080` → `[::1]`).
+    static func hostName(_ host: String) -> String {
+        let host = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if host.hasPrefix("[") {
+            guard let close = host.firstIndex(of: "]") else { return host }
+            return String(host[...close])
+        }
+        if let colon = host.lastIndex(of: ":") { return String(host[..<colon]) }
+        return host
+    }
+
+    /// Whether `host` (a listener address) is a loopback address or `localhost`.
+    static func isLoopback(_ host: String) -> Bool {
+        var name = host.lowercased()
+        if name.hasPrefix("["), name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
+        if name == "localhost" { return true }
+        var v4 = in_addr()
+        if inet_pton(AF_INET, name, &v4) == 1 { return UInt32(bigEndian: v4.s_addr) >> 24 == 127 }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, name, &v6) == 1 {
+            let bytes = withUnsafeBytes(of: &v6) { Array($0) }
+            if bytes[0..<15].allSatisfy({ $0 == 0 }), bytes[15] == 1 { return true }  // ::1
+            // IPv4-mapped 127.0.0.0/8 (::ffff:127.x.x.x).
+            return bytes[0..<10].allSatisfy { $0 == 0 } && bytes[10] == 0xFF && bytes[11] == 0xFF && bytes[12] == 127
+        }
+        return false
+    }
 
     private func isAllowed(origin: String) -> Bool {
         configuration.allowedOrigins.contains("*") || configuration.allowedOrigins.contains(origin)
@@ -286,11 +480,24 @@ public final class OpenAIServer: Sendable {
 
     // MARK: Models and health
 
+    /// Whether `model` can run; `reason` is a snake_case code when not.
     private func availability(of model: any LanguageModel) -> (available: Bool, reason: String?) {
         guard let system = model as? SystemLanguageModel else { return (true, nil) }
         switch system.availability {
         case .available: return (true, nil)
-        case .unavailable(let reason): return (false, String(describing: reason))
+        case .unavailable(let reason): return (false, Self.reasonCode(reason))
+        }
+    }
+
+    /// The reason codes used across open-apple-models (the bridge's
+    /// `model/availability`, `oam`): `device_not_eligible`,
+    /// `apple_intelligence_not_enabled`, `model_not_ready` or `unknown`.
+    static func reasonCode(_ reason: SystemLanguageModel.Availability.UnavailableReason) -> String {
+        switch reason {
+        case .deviceNotEligible: "device_not_eligible"
+        case .appleIntelligenceNotEnabled: "apple_intelligence_not_enabled"
+        case .modelNotReady: "model_not_ready"
+        @unknown default: "unknown"
         }
     }
 
@@ -300,15 +507,16 @@ public final class OpenAIServer: Sendable {
             let status = availability(of: configuration.models[name]!)
             models[name] = .string(status.available ? "available" : "unavailable: \(status.reason ?? "unknown")")
         }
-        let defaultStatus = configuration.resolveModel(nil).map { availability(of: $0.model) } ?? (false, "no default model")
-        let body: JSONValue = [
+        let defaultStatus = configuration.resolveModel(nil).map { availability(of: $0.model) } ?? (false, "no_default_model")
+        var body: JSONObject = [
             "status": .string(defaultStatus.available ? "ok" : "unavailable"),
             "default_model": .string(configuration.defaultModel),
             "models": .object(models),
             "active_requests": .number(Double(limiter.activeCount)),
             "queued_requests": .number(Double(limiter.queuedCount)),
         ]
-        return .json(body, status: defaultStatus.available ? 200 : 503)
+        if !defaultStatus.available { body["reason"] = .string(defaultStatus.reason ?? "unknown") }
+        return .json(.object(body), status: defaultStatus.available ? 200 : 503)
     }
 
     private func modelObject(_ id: String, target: String? = nil) -> JSONValue {
@@ -351,7 +559,7 @@ public final class OpenAIServer: Sendable {
         }
         let status = availability(of: plan.model)
         guard status.available else {
-            return OpenAIError(status: 503, message: "The model '\(plan.modelID)' is unavailable: \(status.reason ?? "unknown reason").",
+            return OpenAIError(status: 503, message: "The model '\(plan.modelID)' is unavailable: \(status.reason ?? "unknown").",
                                type: "server_error", code: "model_unavailable", retryAfter: 30).response
         }
 
@@ -487,15 +695,19 @@ final class OneShot<Value: Sendable>: Sendable {
 
     private let state = Mutex(State())
 
-    func fulfill(_ value: Value) {
-        let waiters = state.withLock { state -> [CheckedContinuation<Value, Never>] in
-            guard !state.delivered else { return [] }
+    /// Delivers `value`; returns false (doing nothing) if a value was already delivered.
+    @discardableResult
+    func fulfill(_ value: Value) -> Bool {
+        let waiters = state.withLock { state -> [CheckedContinuation<Value, Never>]? in
+            guard !state.delivered else { return nil }
             state.delivered = true
             state.value = value
             defer { state.waiters = [] }
             return state.waiters
         }
+        guard let waiters else { return false }
         waiters.forEach { $0.resume(returning: value) }
+        return true
     }
 
     func value() async -> Value {

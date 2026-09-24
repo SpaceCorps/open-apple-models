@@ -78,6 +78,11 @@ import Testing
     @Test func expectContinueIsSignalledBeforeTheBody() throws {
         var parser = HTTPRequestParser(limits: Self.limits)
         parser.append(Array("POST /x HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n".utf8))
+        guard case .head(let head)? = try parser.next() else {
+            Issue.record("expected the head first")
+            return
+        }
+        #expect(head.path == "/x" && head.body.isEmpty)
         #expect(try parser.next() == .expectContinue)
         #expect(try parser.next() == nil)
         parser.append(Array("body".utf8))
@@ -86,6 +91,77 @@ import Testing
             return
         }
         #expect(request.body == Data("body".utf8))
+    }
+
+    @Test func headIsReportedBeforeAnyBodyByte() throws {
+        var parser = HTTPRequestParser(limits: Self.limits)
+        parser.append(Array("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer k\r\nContent-Length: 40\r\n\r\n".utf8))
+        guard case .head(let head)? = try parser.next() else {
+            Issue.record("expected the head before the body arrived")
+            return
+        }
+        #expect(head.method == "POST")
+        #expect(head.headers["Authorization"] == "Bearer k")
+        #expect(head.body.isEmpty)
+        #expect(try parser.next() == nil)
+        // Every request is reported as a head, then as a complete request.
+        let events = try Self.parse("GET /a HTTP/1.1\r\nHost: x\r\n\r\nPOST /b HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n")
+        let kinds = events.map { event -> String in
+            switch event {
+            case .head(let request): "head \(request.path)"
+            case .expectContinue: "continue"
+            case .request(let request): "request \(request.path) \(String(decoding: request.body, as: UTF8.self))"
+            }
+        }
+        #expect(kinds == ["head /a", "request /a ", "head /b", "request /b hi"])
+    }
+
+    @Test func largeChunkedBodiesAreAssembledInPlace() throws {
+        // Many small chunks: the body buffer grows in place (this was
+        // quadratic when the body was copied out of the state on each read).
+        let chunkCount = 20_000
+        var input = "POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        input += String(repeating: "1\r\na\r\n", count: chunkCount) + "0\r\n\r\n"
+        let limits = HTTPRequestParser.Limits(maxHeaderBytes: 1024, maxBodyBytes: 1 << 20)
+        var parser = HTTPRequestParser(limits: limits)
+        var body: Data?
+        let bytes = Array(input.utf8)
+        var index = 0
+        while index < bytes.count {
+            let end = min(bytes.count, index + 7)
+            parser.append(bytes[index..<end])
+            index = end
+            while let event = try parser.next() {
+                if case .request(let request) = event { body = request.body }
+            }
+            #expect(parser.retainedByteCount < 256 * 1024)
+        }
+        #expect(body?.count == chunkCount)
+        #expect(parser.retainedByteCount == 0)
+    }
+
+    @Test func chunkSizesAreStrictASCIIHex() {
+        #expect(HTTPRequestParser.chunkSize(ArraySlice("1F".utf8)) == 31)
+        #expect(HTTPRequestParser.chunkSize(ArraySlice("0".utf8)) == 0)
+        #expect(HTTPRequestParser.chunkSize(ArraySlice("a ;ext=1".utf8)) == 10)
+        #expect(HTTPRequestParser.chunkSize(ArraySlice("a\t;ext".utf8)) == 10)
+        for invalid in ["+2f", "-0", "0x5", " 5", "5 ", "", ";ext", "\u{0665}", "1_0", "ffffffffffffffff"] {
+            #expect(HTTPRequestParser.chunkSize(ArraySlice(invalid.utf8)) == nil, "\(invalid.debugDescription)")
+        }
+    }
+
+    @Test(arguments: [
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n+2\r\nhi\r\n0\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n-0\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n 2\r\nhi\r\n0\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n\u{0662}\r\nhi\r\n0\r\n\r\n",
+        "GET / HTTP/\u{0661}.\u{0661}\r\nHost: x\r\n\r\n",
+        "GET / HTTP/1.\u{0661}\r\nHost: x\r\n\r\n",
+        "GET / HTTP/+1.1\r\nHost: x\r\n\r\n",
+        "GET / http/1.1\r\nHost: x\r\n\r\n",
+    ])
+    func lenientNumbersAreRejected(input: String) {
+        Self.expectError(input, status: 400)
     }
 
     @Test func percentDecodedPathAndAbsoluteForm() throws {

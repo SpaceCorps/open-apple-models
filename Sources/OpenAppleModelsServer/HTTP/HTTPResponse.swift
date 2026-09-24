@@ -18,7 +18,8 @@ public struct HTTPResponse: Sendable {
 
     /// The status code, e.g. 200.
     public var status: Int
-    /// Response header fields. `Content-Length`, `Transfer-Encoding`, `Connection` and `Date` are set when written.
+    /// Response header fields. `Content-Length`, `Transfer-Encoding`, `Connection` and `Date` are set when written
+    /// (1xx, 204 and 304 responses get neither `Content-Length` nor a body).
     public var headers: HTTPHeaders
     /// The body.
     public var body: Body
@@ -60,6 +61,7 @@ public struct HTTPResponse: Sendable {
         case 100: "Continue"
         case 200: "OK"
         case 204: "No Content"
+        case 304: "Not Modified"
         case 400: "Bad Request"
         case 401: "Unauthorized"
         case 403: "Forbidden"
@@ -69,6 +71,7 @@ public struct HTTPResponse: Sendable {
         case 411: "Length Required"
         case 413: "Content Too Large"
         case 415: "Unsupported Media Type"
+        case 421: "Misdirected Request"
         case 429: "Too Many Requests"
         case 431: "Request Header Fields Too Large"
         case 500: "Internal Server Error"

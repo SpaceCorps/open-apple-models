@@ -48,6 +48,30 @@ import Testing
         #expect(!mapped.continuesAfterToolOutput)
     }
 
+    @Test func trailingSystemMessagesDoNotEndTheConversation() throws {
+        // A system message after the prompt still counts as instructions.
+        let mapped = try Self.map("""
+            [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"},
+             {"role": "developer", "content": "Answer in French."}]
+            """)
+        #expect(mapped.instructions == "Be brief.\n\nAnswer in French.")
+        #expect(mapped.promptText == "Hi")
+        #expect(mapped.history.isEmpty)
+        #expect(!mapped.continuesAfterToolOutput)
+
+        let afterTools = try Self.map("""
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"}, {"role": "system", "content": "Be kind."}]
+            """)
+        #expect(afterTools.continuesAfterToolOutput)
+        #expect(afterTools.instructions == "Be kind.")
+        // Trailing instructions do not make a trailing assistant message valid.
+        Self.expectError("""
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}, {"role": "system", "content": "x"}]
+            """, code: "invalid_last_message")
+    }
+
     @Test func multiTurnHistory() throws {
         let mapped = try Self.map("""
             [{"role": "user", "content": "one"}, {"role": "assistant", "content": "uno"},

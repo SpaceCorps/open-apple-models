@@ -46,11 +46,29 @@ public struct ServerConfiguration: Sendable {
     /// `"http://localhost:3000"`). Requests carrying any other `Origin`
     /// header are rejected with 403. `"*"` allows every origin.
     public var allowedOrigins: Set<String>
+    /// Extra `Host` header names (without port, for example `"oam.local"`)
+    /// accepted in addition to `localhost`, `127.0.0.1` and `[::1]`.
+    ///
+    /// When the TCP listener is bound to a loopback address, and always on
+    /// the Unix socket, requests whose `Host` is not one of these are
+    /// rejected with 421 (DNS-rebinding protection). On other interfaces the
+    /// `Host` header is only checked when this set is not empty. `"*"`
+    /// disables the check.
+    public var allowedHosts: Set<String>
 
     /// Largest accepted request body.
     public var maxRequestBodyBytes: Int
     /// Largest accepted request head (request line plus headers).
     public var maxHeaderBytes: Int
+    /// Open client connections allowed at once. Further connections get
+    /// 503 `too_many_connections` and are closed.
+    public var maxConnections: Int
+    /// Memory for request heads and bodies buffered across all connections
+    /// (being received or being processed). A request that would exceed it
+    /// gets 503 `server_overloaded` and its connection is closed. Raised to
+    /// at least one maximal request (``maxRequestBodyBytes`` plus
+    /// ``maxHeaderBytes`` and some read-ahead) if set lower.
+    public var maxBufferedRequestBytes: Int
     /// Chat completions generated at the same time; further requests queue.
     public var maxConcurrentRequests: Int
     /// Requests allowed to wait in the queue; beyond this, 429 is returned.
@@ -76,6 +94,16 @@ public struct ServerConfiguration: Sendable {
 
     /// Receives diagnostic messages (access log, errors).
     public var logger: (@Sendable (ServerLogEntry) -> Void)?
+    /// Called when the server starts, restarts a failed listener, or stops
+    /// (see ``ServerState``). Runs on an internal queue; do not block it.
+    public var onStateChange: (@Sendable (ServerState) -> Void)?
+
+    /// Restarts attempted after a listener fails while running (for example
+    /// when iOS reclaims the socket of a suspended app) before the server
+    /// gives up and stops.
+    var listenerRestartAttempts = 5
+    /// Delay before the first restart attempt; doubled for each further one.
+    var listenerRestartDelay: Duration = .milliseconds(250)
 
     /// Creates a configuration; every parameter matches the property of the same name.
     public init(
@@ -89,8 +117,11 @@ public struct ServerConfiguration: Sendable {
         serverInstructions: String? = nil,
         apiKey: String? = nil,
         allowedOrigins: Set<String> = [],
+        allowedHosts: Set<String> = [],
         maxRequestBodyBytes: Int = 16 << 20,
         maxHeaderBytes: Int = 64 << 10,
+        maxConnections: Int = 64,
+        maxBufferedRequestBytes: Int = 64 << 20,
         maxConcurrentRequests: Int = 4,
         maxQueuedRequests: Int = 64,
         requestTimeout: Duration = .seconds(120),
@@ -99,7 +130,8 @@ public struct ServerConfiguration: Sendable {
         toolPolicy: ToolPolicy = ToolPolicy(),
         contextPolicy: ContextPolicy = ContextPolicy(trimsHistory: false),
         retryPolicy: RetryPolicy = .default,
-        logger: (@Sendable (ServerLogEntry) -> Void)? = nil
+        logger: (@Sendable (ServerLogEntry) -> Void)? = nil,
+        onStateChange: (@Sendable (ServerState) -> Void)? = nil
     ) {
         self.host = host
         self.port = port
@@ -111,8 +143,11 @@ public struct ServerConfiguration: Sendable {
         self.serverInstructions = serverInstructions
         self.apiKey = apiKey
         self.allowedOrigins = allowedOrigins
+        self.allowedHosts = allowedHosts
         self.maxRequestBodyBytes = maxRequestBodyBytes
         self.maxHeaderBytes = maxHeaderBytes
+        self.maxConnections = maxConnections
+        self.maxBufferedRequestBytes = maxBufferedRequestBytes
         self.maxConcurrentRequests = maxConcurrentRequests
         self.maxQueuedRequests = maxQueuedRequests
         self.requestTimeout = requestTimeout
@@ -122,6 +157,7 @@ public struct ServerConfiguration: Sendable {
         self.contextPolicy = contextPolicy
         self.retryPolicy = retryPolicy
         self.logger = logger
+        self.onStateChange = onStateChange
     }
 
     /// Resolves a requested model id (or alias) to its canonical id and model.
@@ -130,5 +166,27 @@ public struct ServerConfiguration: Sendable {
         if let model = models[name] { return (name, model) }
         if let target = modelAliases[name], let model = models[target] { return (target, model) }
         return nil
+    }
+}
+
+/// A lifecycle change of ``OpenAIServer``, reported to
+/// ``ServerConfiguration/onStateChange``.
+public enum ServerState: Sendable, Equatable, CustomStringConvertible {
+    /// Every listener accepts connections: after ``OpenAIServer/start()``
+    /// or after a failed listener was restarted.
+    case running
+    /// A listener failed while running (`reason`) and is being restarted;
+    /// `attempt` counts from 1. Connections are not accepted meanwhile.
+    case restarting(attempt: Int, reason: String)
+    /// The server stopped: `reason` is `nil` after ``OpenAIServer/stop()``,
+    /// or says why a failed listener could not be restarted.
+    case stopped(reason: String?)
+
+    public var description: String {
+        switch self {
+        case .running: "running"
+        case .restarting(let attempt, let reason): "restarting (attempt \(attempt)): \(reason)"
+        case .stopped(let reason): reason.map { "stopped: \($0)" } ?? "stopped"
+        }
     }
 }

@@ -17,7 +17,12 @@ struct HTTPParseError: Error, Sendable, Equatable, CustomStringConvertible {
 /// it returns `nil` (more bytes needed). Handles partial reads, pipelined
 /// requests, `Content-Length` and `chunked` bodies, and enforces header and
 /// body size limits. It is strict where leniency enables request smuggling
-/// (conflicting lengths, whitespace before colons, obsolete line folding).
+/// (conflicting lengths, whitespace before colons, obsolete line folding,
+/// non-ASCII digits in versions and chunk sizes).
+///
+/// Every request is announced twice: first as ``Event/head(_:)`` as soon
+/// as its head is parsed (before any body byte is read), then as
+/// ``Event/request(_:)`` once the body is complete.
 struct HTTPRequestParser {
     struct Limits: Sendable {
         var maxHeaderBytes: Int
@@ -25,9 +30,14 @@ struct HTTPRequestParser {
     }
 
     enum Event: Equatable {
+        /// A request head was parsed and its framing validated; the body
+        /// has not been read yet (the request's `body` is empty). Checks
+        /// that do not need the body can reject the request now.
+        case head(HTTPRequest)
         /// The client sent `Expect: 100-continue` and waits for an interim
         /// `100 Continue` before sending the body.
         case expectContinue
+        /// A complete request, body included.
         case request(HTTPRequest)
     }
 
@@ -45,10 +55,17 @@ struct HTTPRequestParser {
         case trailers
     }
 
+    private enum Framing {
+        case length(Int)
+        case chunked
+    }
+
     private enum State {
         case head(scanned: Int)
+        /// The head was reported; the body has not been read yet.
+        case headReported(Head, Framing)
         case fixedBody(Head, length: Int)
-        case chunkedBody(Head, phase: ChunkPhase, body: [UInt8])
+        case chunkedBody(Head, phase: ChunkPhase)
         case failed(HTTPParseError)
     }
 
@@ -57,6 +74,9 @@ struct HTTPRequestParser {
     private var offset = 0
     private var state: State = .head(scanned: 0)
     private var sentContinue = false
+    /// The de-chunked body being assembled. Kept out of `state` so appends
+    /// mutate it in place instead of copying it on every read.
+    private var chunkedBody: [UInt8] = []
     var transport: HTTPTransport = .tcp
 
     init(limits: Limits) {
@@ -69,6 +89,11 @@ struct HTTPRequestParser {
 
     /// Bytes received but not yet consumed by a complete request.
     var bufferedByteCount: Int { buffer.count - offset }
+
+    /// Bytes of memory held for requests in progress: the receive buffer
+    /// (including consumed bytes not yet compacted away) plus a chunked
+    /// body being assembled.
+    var retainedByteCount: Int { buffer.count + chunkedBody.count }
 
     /// True between requests with nothing buffered.
     var isIdle: Bool {
@@ -109,21 +134,34 @@ struct HTTPRequestParser {
                 throw HTTPParseError(status: 431, message: "Request headers exceed \(limits.maxHeaderBytes) bytes.")
             }
             let head = try parseHead(buffer[offset..<end.headEnd])
+            let framing = try framing(of: head)
             offset = end.bodyStart
             sentContinue = false
-            return try beginBody(head)
+            state = .headReported(head, framing)
+            return .head(makeRequest(head, body: Data()))
+        case .headReported(let head, let framing):
+            switch framing {
+            case .length(let length):
+                state = .fixedBody(head, length: length)
+            case .chunked:
+                chunkedBody = []
+                state = .chunkedBody(head, phase: .size)
+            }
+            return try step()
         case .fixedBody(let head, let length):
             guard bufferedByteCount >= length else { return continueIfExpected(head) }
             let body = Data(buffer[offset..<offset + length])
             offset += length
             state = .head(scanned: offset)
             return .request(makeRequest(head, body: body))
-        case .chunkedBody(let head, let phase, let body):
-            return try stepChunked(head, phase: phase, body: body)
+        case .chunkedBody(let head, let phase):
+            return try stepChunked(head, phase: phase)
         }
     }
 
-    private mutating func beginBody(_ head: Head) throws(HTTPParseError) -> Event? {
+    /// Validates how the body is delimited; rejects smuggling-prone and
+    /// oversized declarations before any body byte is read.
+    private func framing(of head: Head) throws(HTTPParseError) -> Framing {
         let lengths = head.headers.values(for: "Content-Length")
         let encodings = head.headers.values(for: "Transfer-Encoding")
         if !encodings.isEmpty {
@@ -132,8 +170,7 @@ struct HTTPRequestParser {
             guard codings == ["chunked"] else {
                 throw HTTPParseError(status: 501, message: "Unsupported Transfer-Encoding '\(encodings.joined(separator: ", "))'.")
             }
-            state = .chunkedBody(head, phase: .size, body: [])
-            return try step()
+            return .chunked
         }
         var length = 0
         if !lengths.isEmpty {
@@ -147,8 +184,7 @@ struct HTTPRequestParser {
         guard length <= limits.maxBodyBytes else {
             throw HTTPParseError(status: 413, message: "Request body of \(length) bytes exceeds the limit of \(limits.maxBodyBytes) bytes.")
         }
-        state = .fixedBody(head, length: length)
-        return try step()
+        return .length(length)
     }
 
     private mutating func continueIfExpected(_ head: Head) -> Event? {
@@ -158,11 +194,10 @@ struct HTTPRequestParser {
         return .expectContinue
     }
 
-    private mutating func stepChunked(_ head: Head, phase: ChunkPhase, body: [UInt8]) throws(HTTPParseError) -> Event? {
+    private mutating func stepChunked(_ head: Head, phase: ChunkPhase) throws(HTTPParseError) -> Event? {
         var phase = phase
-        var body = body
         defer {
-            if case .chunkedBody = state { state = .chunkedBody(head, phase: phase, body: body) }
+            if case .chunkedBody = state { state = .chunkedBody(head, phase: phase) }
         }
         while true {
             switch phase {
@@ -171,21 +206,18 @@ struct HTTPRequestParser {
                     if bufferedByteCount > 1024 { throw .bad("Chunk size line too long.") }
                     return continueIfExpected(head)
                 }
-                var line = buffer[offset..<lineEnd.contentEnd]
-                if let semicolon = line.firstIndex(of: UInt8(ascii: ";")) { line = line[..<semicolon] }
-                let text = String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces)
-                guard !text.isEmpty, text.count <= 15, let size = Int(text, radix: 16), size >= 0 else {
+                guard let size = Self.chunkSize(buffer[offset..<lineEnd.contentEnd]) else {
                     throw .bad("Invalid chunk size.")
                 }
                 offset = lineEnd.next
-                guard body.count + size <= limits.maxBodyBytes else {
+                guard chunkedBody.count + size <= limits.maxBodyBytes else {
                     throw HTTPParseError(status: 413, message: "Request body exceeds the limit of \(limits.maxBodyBytes) bytes.")
                 }
                 phase = size == 0 ? .trailers : .data(remaining: size)
             case .data(let remaining):
                 let available = min(remaining, bufferedByteCount)
                 guard available > 0 else { return nil }
-                body.append(contentsOf: buffer[offset..<offset + available])
+                chunkedBody.append(contentsOf: buffer[offset..<offset + available])
                 offset += available
                 phase = remaining == available ? .dataTerminator : .data(remaining: remaining - available)
             case .dataTerminator:
@@ -211,10 +243,35 @@ struct HTTPRequestParser {
                 offset = lineEnd.next
                 if isEmpty {
                     state = .head(scanned: offset)
-                    return .request(makeRequest(head, body: Data(body)))
+                    let body = Data(chunkedBody)
+                    chunkedBody = []
+                    return .request(makeRequest(head, body: body))
                 }
             }
         }
+    }
+
+    /// Parses `chunk-size [BWS ";" chunk-ext]`: 1–15 ASCII hex digits, with
+    /// whitespace allowed only between the size and a `;` extension.
+    static func chunkSize(_ line: ArraySlice<UInt8>) -> Int? {
+        var digits = line
+        if let semicolon = line.firstIndex(of: UInt8(ascii: ";")) {
+            digits = line[..<semicolon]
+            while let last = digits.last, last == 0x20 || last == 0x09 { digits = digits.dropLast() }
+        }
+        guard !digits.isEmpty, digits.count <= 15 else { return nil }
+        var size = 0
+        for byte in digits {
+            let value: UInt8
+            switch byte {
+            case UInt8(ascii: "0")...UInt8(ascii: "9"): value = byte - UInt8(ascii: "0")
+            case UInt8(ascii: "a")...UInt8(ascii: "f"): value = byte - UInt8(ascii: "a") + 10
+            case UInt8(ascii: "A")...UInt8(ascii: "F"): value = byte - UInt8(ascii: "A") + 10
+            default: return nil
+            }
+            size = size << 4 | Int(value)
+        }
+        return size
     }
 
     private func makeRequest(_ head: Head, body: Data) -> HTTPRequest {
@@ -292,13 +349,14 @@ struct HTTPRequestParser {
         return Head(method: method, target: target, version: version, headers: headers)
     }
 
+    /// Parses `HTTP/<digit>.<digit>` with ASCII digits only (RFC 9112 §2.3).
     private func parseVersion(_ bytes: ArraySlice<UInt8>) throws(HTTPParseError) -> HTTPVersion {
-        let text = String(decoding: bytes, as: UTF8.self)
-        guard text.hasPrefix("HTTP/"), text.count == 8 else { throw .bad("Malformed HTTP version.") }
-        let digits = Array(text.dropFirst(5))
-        guard digits[1] == ".", let major = digits[0].wholeNumberValue, let minor = digits[2].wholeNumberValue else {
-            throw .bad("Malformed HTTP version.")
-        }
+        let bytes = Array(bytes)
+        func isDigit(_ byte: UInt8) -> Bool { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) }
+        guard bytes.count == 8, bytes[0..<5].elementsEqual("HTTP/".utf8), isDigit(bytes[5]),
+              bytes[6] == UInt8(ascii: "."), isDigit(bytes[7])
+        else { throw .bad("Malformed HTTP version.") }
+        let major = Int(bytes[5] - UInt8(ascii: "0")), minor = Int(bytes[7] - UInt8(ascii: "0"))
         guard major == 1 else { throw HTTPParseError(status: 505, message: "Only HTTP/1.x is supported.") }
         return HTTPVersion(major: major, minor: minor)
     }

@@ -102,13 +102,13 @@ import Testing
         defer { server.stop() }
         let client = try RawClient(port: try #require(server.port))
         let body = #"{"messages": [{"role": "user", "content": "Hi"}], "stream": true}"#
-        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
+        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
         let response = try #require(client.readResponse())
         #expect(response.headers["transfer-encoding"] == "chunked")
         #expect(SSE.content(try SSE.chunks(response.text)) == "chunked stream")
         // The connection is still usable afterwards.
         let plain = #"{"messages": [{"role": "user", "content": "Hi"}]}"#
-        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: \(plain.utf8.count)\r\n\r\n\(plain)")
+        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: \(plain.utf8.count)\r\n\r\n\(plain)")
         #expect(client.readResponse()?.status == 200)
     }
 
@@ -117,14 +117,14 @@ import Testing
         defer { server.stop() }
         let client = try RawClient(port: try #require(server.port))
         let body = #"{"messages": [{"role": "user", "content": "Hi"}]}"#
-        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: \(body.utf8.count)\r\n\r\n")
+        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: \(body.utf8.count)\r\n\r\n")
         try await Task.sleep(for: .milliseconds(100))
         client.send(body)
         #expect(client.readResponse()?.status == 200)  // readResponse skips the interim 100.
 
         let half = body.utf8.count / 2
         let first = String(body.prefix(half)), second = String(body.dropFirst(half))
-        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
             + String(first.utf8.count, radix: 16) + "\r\n" + first + "\r\n" + String(second.utf8.count, radix: 16) + "\r\n" + second + "\r\n0\r\n\r\n")
         let response = try #require(client.readResponse())
         #expect(try JSONValue(parsing: response.text)["choices"]?[0]?["message"]?["content"] == "chunked")
@@ -146,11 +146,11 @@ import Testing
         #expect(try JSONValue(parsing: bad.text)["error"]?["message"] != nil)
 
         let big = try RawClient(port: port)
-        big.send("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 5000\r\n\r\n")
+        big.send("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 5000\r\n\r\n")
         #expect(big.readResponse()?.status == 413)
 
         let huge = try RawClient(port: port)
-        huge.send("GET /health HTTP/1.1\r\nHost: x\r\nX-Filler: \(String(repeating: "z", count: 4000))\r\n\r\n")
+        huge.send("GET /health HTTP/1.1\r\nHost: localhost\r\nX-Filler: \(String(repeating: "z", count: 4000))\r\n\r\n")
         #expect(huge.readResponse()?.status == 431)
 
         let noHost = try RawClient(port: port)
@@ -163,7 +163,7 @@ import Testing
         defer { server.stop() }
         let client = try RawClient(port: try #require(server.port))
         // Send half a request and stall (slowloris).
-        client.send("GET /health HTTP/1.1\r\nHost: x\r\n")
+        client.send("GET /health HTTP/1.1\r\nHost: localhost\r\n")
         let clock = ContinuousClock()
         let start = clock.now
         #expect(client.isClosedByPeer())
@@ -214,7 +214,7 @@ import Testing
         do {
             let client = try RawClient(port: port)
             let body = #"{"messages": [{"role": "user", "content": "Hi"}]}"#
-            client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
+            client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
             try await Task.sleep(for: .milliseconds(200))
             #expect(await server.get("/health").body["active_requests"] == 1)
         }  // The client closes its socket here.
@@ -233,7 +233,7 @@ import Testing
         let waiter = Task { await server.waitUntilStopped() }
         let client = try RawClient(port: port)
         let body = #"{"messages": [{"role": "user", "content": "Hi"}]}"#
-        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
+        client.send("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
         try await Task.sleep(for: .milliseconds(200))
         #expect(server.connectionCount == 1)
         server.stop()
