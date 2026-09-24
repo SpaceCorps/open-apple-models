@@ -133,6 +133,12 @@ public final class StepController: Sendable {
         }
         if request.enabledToolDefinitions.isEmpty { mode = .disallowed }
         request.generationOptions.toolCallingMode = mode
+        if mode.kind == .disallowed {
+            // With tool definitions still visible, the on-device model tends to
+            // answer "let me check…" instead of answering. Hide them entirely.
+            request.enabledToolDefinitions = []
+            request.transcript = Self.hidingToolDefinitions(request.transcript)
+        }
 
         var trimmed = 0
         if context.trimsHistory, let contextSize {
@@ -146,6 +152,16 @@ public final class StepController: Sendable {
             enabledTools: request.enabledToolDefinitions.map(\.name),
             trimmedEntries: trimmed))
         return request
+    }
+
+    static func hidingToolDefinitions(_ transcript: Transcript) -> Transcript {
+        guard case .instructions(var instructions)? = transcript.first, !instructions.toolDefinitions.isEmpty else {
+            return transcript
+        }
+        instructions.toolDefinitions = []
+        var entries = Array(transcript)
+        entries[0] = .instructions(instructions)
+        return Transcript(entries: entries)
     }
 
     /// Entries after the most recent prompt (the turn in progress).

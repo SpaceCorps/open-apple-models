@@ -212,9 +212,17 @@ final class Counter: Sendable {
         async let a = agent.respond(to: "one")
         async let b = agent.respond(to: "two")
         let (first, second) = try await (a, b)
-        #expect(first.text == "first")
-        #expect(second.text == "second")
-        #expect(agent.history.count == 4)
+        // Which turn is queued first is unspecified; what matters is that they
+        // never overlap (an overlapping request would fail with .busy).
+        #expect(Set([first.text, second.text]) == ["first", "second"])
+        let kinds = agent.history.map { entry -> String in
+            switch entry {
+            case .prompt: "prompt"
+            case .response: "response"
+            default: "other"
+            }
+        }
+        #expect(kinds == ["prompt", "response", "prompt", "response"])
     }
 
     @Test func cancellation() async throws {
