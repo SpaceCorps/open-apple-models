@@ -16,6 +16,7 @@ final class TurnContext: Sendable {
         var steps: [ModelStep] = []
         var started = false
         var finished = false
+        var cancelled = false
     }
 
     private let state = Mutex(State())
@@ -90,8 +91,12 @@ final class TurnContext: Sendable {
     func awaitExternalOutput(for call: ToolCall, announce: @Sendable () -> Void) async -> ToolOutput {
         await withTaskCancellationHandler {
             await withCheckedContinuation { (resume: CheckedContinuation<ToolOutput, Never>) in
+                let alreadyCancelled = Task.isCancelled
                 let immediate: ToolOutput? = state.withLock { state in
                     if state.finished { return .error("The turn has ended.") }
+                    // The cancellation handler may have run before this
+                    // registration; never park a call nobody can answer.
+                    if state.cancelled || alreadyCancelled { return .error("The tool call was cancelled.") }
                     state.pending[call.id] = (call, resume)
                     return nil
                 }
@@ -118,6 +123,7 @@ final class TurnContext: Sendable {
 
     func cancelPending(reason: String) {
         let pending = state.withLock { state in
+            state.cancelled = true
             defer { state.pending.removeAll() }
             return Array(state.pending.values)
         }
@@ -128,11 +134,17 @@ final class TurnContext: Sendable {
 /// Routes tool invocations from FoundationModels to the active turn.
 final class ToolRuntime: Sendable {
     private let current = Mutex<TurnContext?>(nil)
+    private let active = Mutex(0)
+
+    /// Tool invocations still running inside the framework.
+    var runningInvocations: Int { active.withLock { $0 } }
 
     func begin(_ turn: TurnContext) { current.withLock { $0 = turn } }
     func end() { current.withLock { $0 = nil } }
 
     func invoke(_ tool: AgentTool, arguments: GeneratedContent) async throws -> String {
+        active.withLock { $0 += 1 }
+        defer { active.withLock { $0 -= 1 } }
         guard let turn = current.withLock({ $0 }) else {
             return ToolOutput.error("Tool '\(tool.name)' is not available right now.").modelText
         }

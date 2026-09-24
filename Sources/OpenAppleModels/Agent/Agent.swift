@@ -48,6 +48,13 @@ public struct AgentConfiguration: Sendable {
     public var toolTimeout: Duration?
     /// Retries for transient model failures.
     public var retry: RetryPolicy
+    /// Stream responses (token deltas as `.text`/`.partial` events). When
+    /// false, the turn uses FoundationModels' non-streaming `respond` and
+    /// emits the final text as one event. FoundationModels on macOS/iOS 27.0
+    /// has a rare crash (roughly one in 10,000+ turns) in the streaming path
+    /// with tool calls; long-running hosts that don't need token streaming
+    /// can turn streaming off to avoid it. See docs/RESEARCH.md.
+    public var streamsResponses: Bool
 
     public init(
         toolPolicy: ToolPolicy = .default,
@@ -56,7 +63,8 @@ public struct AgentConfiguration: Sendable {
         maximumResponseTokens: Int? = nil,
         sampling: GenerationOptions.SamplingMode? = nil,
         toolTimeout: Duration? = .seconds(60),
-        retry: RetryPolicy = .default
+        retry: RetryPolicy = .default,
+        streamsResponses: Bool = true
     ) {
         self.toolPolicy = toolPolicy
         self.context = context
@@ -65,6 +73,7 @@ public struct AgentConfiguration: Sendable {
         self.sampling = sampling
         self.toolTimeout = toolTimeout
         self.retry = retry
+        self.streamsResponses = streamsResponses
     }
 
     var generationOptions: GenerationOptions {
@@ -411,12 +420,24 @@ public final class Agent: Sendable {
             do {
                 let response: AgentResponse
                 switch format {
-                case .text:
+                case .text where configuration.streamsResponses:
                     response = try await streamText(
                         session: session, prompt: prompt, options: configuration.generationOptions,
                         turn: turn, resetFirst: emittedText, emitted: &emittedText)
-                case .schema(let schema):
+                case .schema(let schema) where configuration.streamsResponses:
                     response = try await streamStructured(session: session, prompt: prompt, schema: schema, options: configuration.generationOptions, turn: turn)
+                case .text:
+                    let result = try await session.respond(to: prompt, options: configuration.generationOptions)
+                    try Task.checkCancellation()
+                    turn.emit(.text(delta: result.content, text: result.content, isReset: emittedText))
+                    emittedText = true
+                    response = AgentResponse(text: result.content, toolCalls: turn.records, usage: TokenUsage(result.usage), steps: turn.steps)
+                case .schema(let schema):
+                    let result = try await session.respond(to: prompt, schema: schema, options: configuration.generationOptions)
+                    try Task.checkCancellation()
+                    let json = JSONValue(result.content).ordered(by: schema)
+                    turn.emit(.partial(json))
+                    response = AgentResponse(text: json.serialized(), structured: json, toolCalls: turn.records, usage: TokenUsage(result.usage), steps: turn.steps)
                 }
                 state.withLock { state in
                     state.usage.inputTokens += response.usage.inputTokens
@@ -427,7 +448,7 @@ public final class Agent: Sendable {
                 return
             } catch {
                 let failure = AgentError(error)
-                await Self.rollBack(session, to: entriesBefore)
+                await rollBack(session, to: entriesBefore)
                 let canRetry = attempt < configuration.retry.maxAttempts
                     && configuration.retry.shouldRetry(failure)
                     && turn.invokedToolCount == 0
@@ -453,12 +474,25 @@ public final class Agent: Sendable {
 
     /// Removes entries a failed or cancelled turn left behind, so the history
     /// only ever contains complete turns.
-    private static func rollBack(_ session: LanguageModelSession, to count: Int) async {
-        // The framework may still be unwinding; wait (without inheriting the
-        // turn's cancellation) until the session is idle.
-        await Task {
-            for _ in 0..<100 where session.isResponding {
-                try? await Task.sleep(for: .milliseconds(10))
+    ///
+    /// After a cancellation FoundationModels reports `isResponding == false`
+    /// at once, while its internal task may still be finishing a model step or
+    /// a tool call; when that task ends it restores its own pre-turn snapshot.
+    /// Releasing the turn queue before then would let that late restore erase
+    /// the *next* turn, so this waits for the framework to go quiet first.
+    private func rollBack(_ session: LanguageModelSession, to count: Int) async {
+        // Wait without inheriting the turn's cancellation.
+        await Task { [controller, runtime] in
+            let clock = ContinuousClock()
+            let busyDeadline = clock.now + .seconds(15)
+            while clock.now < busyDeadline,
+                  session.isResponding || controller.runningSteps > 0 || runtime.runningInvocations > 0 {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            // The framework reverts to its snapshot as it unwinds.
+            let revertDeadline = clock.now + .milliseconds(300)
+            while clock.now < revertDeadline, session.transcript.count > count {
+                try? await Task.sleep(for: .milliseconds(5))
             }
         }.value
         guard !session.isResponding, session.transcript.count > count else { return }

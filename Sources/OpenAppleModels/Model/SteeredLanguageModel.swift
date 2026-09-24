@@ -129,8 +129,15 @@ public final class StepController: Sendable {
     }
 
     private let state = Mutex(State())
+    private let activeSteps = Mutex(0)
 
     public init() {}
+
+    /// Model steps currently executing (the framework may still be running a
+    /// step after the session reports it is no longer responding).
+    var runningSteps: Int { activeSteps.withLock { $0 } }
+    func stepStarted() { activeSteps.withLock { $0 += 1 } }
+    func stepEnded() { activeSteps.withLock { $0 -= 1 } }
 
     /// Sets the policy for the next turn and resets step counting.
     public func beginTurn(policy: ToolPolicy, context: ContextPolicy, observer: (@Sendable (ModelStep) -> Void)? = nil) {
@@ -315,6 +322,8 @@ public struct SteeredExecutor<Base: LanguageModel>: LanguageModelExecutor {
         model: SteeredLanguageModel<Base>,
         streamingInto channel: LanguageModelExecutorGenerationChannel
     ) async throws {
+        model.controller.stepStarted()
+        defer { model.controller.stepEnded() }
         var contextSize: Int?
         var countTokens: (@Sendable ([Transcript.Entry]) async throws -> Int)?
         if let system = model.base as? SystemLanguageModel {

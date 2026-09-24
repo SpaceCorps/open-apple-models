@@ -116,6 +116,56 @@ import Testing
         let second = try await agent.respond(to: "again")
         #expect(second.text.isEmpty == false)
         try await Task.sleep(for: .milliseconds(1800))
-        #expect(agent.history.count == 2)
+        #expect(agent.history.count == 2, "history: \(agent.history.map { String(describing: $0).prefix(40) })")
+    }
+}
+
+@Suite struct NonStreamingAndAbandonmentTests {
+    @Test func nonStreamingTurnsProduceTheSameResults() async throws {
+        let tool = try AgentTool(name: "ping", description: "Ping.") { _ in "pong" }
+        let script = ModelScript([
+            .toolCalls([.init(name: "ping")]), .text("Pong received."),
+            .json(["choice": "b", "why": "because"]),
+        ])
+        let agent = try Agent(model: ScriptedLanguageModel(script), tools: [tool],
+                              configuration: AgentConfiguration(streamsResponses: false))
+        var texts: [String] = []
+        for try await event in agent.run("ping") {
+            if case .text(_, let text, _) = event { texts.append(text) }
+        }
+        #expect(texts == ["Pong received."])
+        let structured = try await agent.respond(to: "choose", schema: .object(["why": .string(), "choice": .string(enum: ["a", "b"])]))
+        #expect(structured.structured?.objectValue?.keys == ["why", "choice"])
+    }
+
+    @Test func externalCallAfterCancellationNeverHangs() async throws {
+        let external = try AgentTool.external(name: "slow_host", description: "Host tool.")
+        let script = ModelScript([.delayed(.milliseconds(200), .toolCalls([.init(name: "slow_host")])), .text("done"), .text("next")])
+        let agent = try Agent(model: ScriptedLanguageModel(script), tools: [external])
+        let task = Task { try await agent.respond(to: "go") }
+        try await Task.sleep(for: .milliseconds(50))
+        task.cancel()
+        _ = try? await task.value
+        // The agent is not wedged: the next turn completes.
+        let next = try await agent.respond(to: "again")
+        #expect(!next.text.isEmpty)
+    }
+
+    @Test func cancellingTheConsumingTaskResolvesExternalCalls() async throws {
+        let external = try AgentTool.external(name: "host", description: "Host tool.")
+        let script = ModelScript([.toolCalls([.init(name: "host")]), .text("after"), .text("next")])
+        let agent = try Agent(model: ScriptedLanguageModel(script), tools: [external])
+        let run = agent.run("go")
+        let consumer = Task {
+            // Keeps listening without answering the tool call, like a view
+            // that goes away before the player acts.
+            for try await _ in run {}
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        consumer.cancel()
+        _ = try? await consumer.value
+        // The pending external call was resolved, so the agent is not wedged.
+        let next = try await agent.respond(to: "again")
+        #expect(!next.text.isEmpty)
     }
 }

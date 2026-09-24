@@ -16,8 +16,10 @@ import Synchronization
 /// }
 /// ```
 ///
-/// The event sequence can be iterated once. Cancelling the iterating task
-/// does not cancel the turn; call ``cancel()`` for that.
+/// The event sequence can be iterated once. Cancelling the task that is
+/// waiting on the sequence cancels the turn; so does ``cancel()``. A consumer
+/// that simply stops iterating does not: the turn keeps running (and waits
+/// for any external tool output it requested).
 public final class AgentRun: AsyncSequence, Sendable {
     public typealias Element = AgentEvent
     public typealias AsyncIterator = AsyncThrowingStream<AgentEvent, any Error>.AsyncIterator
@@ -29,7 +31,15 @@ public final class AgentRun: AsyncSequence, Sendable {
     init(policy: ToolPolicy, defaultToolTimeout: Duration?) {
         let (stream, continuation) = AsyncThrowingStream<AgentEvent, any Error>.makeStream(bufferingPolicy: .unbounded)
         events = stream
-        context = TurnContext(policy: policy, defaultToolTimeout: defaultToolTimeout, continuation: continuation)
+        let context = TurnContext(policy: policy, defaultToolTimeout: defaultToolTimeout, continuation: continuation)
+        self.context = context
+        // A consumer cancelled while waiting for events (e.g. a SwiftUI
+        // `.task` that goes away) cancels the turn: nobody is left to answer
+        // external calls or read the reply.
+        continuation.onTermination = { [weak self] termination in
+            guard case .cancelled = termination else { return }
+            if let self { self.cancel() } else { context.cancelPending(reason: "The event stream was cancelled.") }
+        }
     }
 
     func attach(_ task: Task<Void, Never>) {
