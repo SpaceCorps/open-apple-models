@@ -112,6 +112,23 @@ extension NPC {
 
     // MARK: Prompt and schema
 
+    /// The prompt for the plain-text retry of a turn whose structured reply
+    /// was blocked: same situation, results of tools already called (so the
+    /// retry stays grounded without re-running side effects), and the
+    /// emotion-tag convention of ``NPCReplyFormat/text``.
+    static func textRetryPrompt(_ prompt: String, toolRecords: [ToolRecord]) -> String {
+        var lines = [prompt]
+        let results = toolRecords.filter { !$0.output.isError }
+        if !results.isEmpty {
+            lines.append("Facts you just looked up:")
+            for record in results.prefix(6) {
+                lines.append("- \(record.call.name) \(record.call.arguments.serialized()) → \(record.output.modelText.prefix(400))")
+            }
+        }
+        lines.append("Reply in character with a short spoken line. Begin with your emotion in square brackets, such as [happy] or [angry].")
+        return lines.joined(separator: "\n")
+    }
+
     /// The player's words are always framed as dialogue (`Player: …`):
     /// measured on device, this halved input-guardrail blocks for ordinary
     /// fantasy lines compared with passing the raw line.

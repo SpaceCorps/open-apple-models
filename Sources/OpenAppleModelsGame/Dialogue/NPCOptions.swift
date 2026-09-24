@@ -15,8 +15,15 @@ public struct NPCMemoryTools: OptionSet, Sendable, Hashable, Codable {
 
 /// How an ``NPC`` asks the model for its reply.
 public enum NPCReplyFormat: String, Sendable, Hashable, Codable, CaseIterable {
-    /// Schema-guided output: emotion, line, suggested player replies and
-    /// whether the conversation ends. The default.
+    /// Structured first; if the guardrails block it, retry the turn once as
+    /// plain text (tools off, reusing tool results already gathered) before
+    /// falling back to a canned line. The default: on device, guided (JSON)
+    /// generation trips the guardrails far more often than plain text for
+    /// ordinary game dialogue, so this keeps rich replies when possible and
+    /// real in-character lines when not.
+    case automatic
+    /// Schema-guided output only: emotion, line, suggested player replies and
+    /// whether the conversation ends.
     case structured
     /// Plain text that starts with an emotion tag (`[angry] Get out!`). No
     /// suggested replies, and ``DialogueTurn/endsConversation`` is always
@@ -71,7 +78,8 @@ public struct NPCOptions: Sendable, Hashable, Codable {
 
     // MARK: Reply shape
 
-    /// Structured (default) or plain-text replies.
+    /// Automatic (default: structured with a plain-text retry), structured-only
+    /// or plain-text replies.
     public var replyFormat: NPCReplyFormat
     /// Emotions the model may choose from (all by default; structured replies only).
     public var emotions: [Emotion]
@@ -124,7 +132,7 @@ public struct NPCOptions: Sendable, Hashable, Codable {
         maxFacts: Int = 12,
         maxRelationshipChange: Int = 10,
         secretsUnlockAtRelationship: Int? = 50,
-        replyFormat: NPCReplyFormat = .structured,
+        replyFormat: NPCReplyFormat = .automatic,
         emotions: [Emotion] = Emotion.allCases,
         playerOptionCount: Int = 3,
         canEndConversation: Bool = true,

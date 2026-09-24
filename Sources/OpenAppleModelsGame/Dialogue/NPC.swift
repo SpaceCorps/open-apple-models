@@ -284,63 +284,79 @@ public final class NPC: Sendable {
             return
         }
         memoryStore.discardPending()
-        let run = setup.schema.map { agent.run(setup.prompt, schema: $0, policy: setup.policy) }
-            ?? agent.run(setup.prompt, policy: setup.policy)
-        guard stream.attach(run) else {
-            _ = try? await run.response()
-            stream.fail(AgentError(.cancelled, "The turn was cancelled."))
-            return
-        }
 
         var tracker = LineTracker(speaker: setup.persona.name)
         var records: [ToolRecord] = []
-        do {
-            var response: AgentResponse?
-            for try await event in run {
-                switch event {
-                case .partial(let json): tracker.consume(json, emit: stream.emit)
-                case .text(_, let text, _):
-                    if let partial = Self.partialTextReply(text) { tracker.consume(partial, emit: stream.emit) }
-                case .toolCallStarted(let call): stream.emit(.toolCall(call))
-                case .toolCallRequested(let call): stream.emit(.externalToolCall(call))
-                case .toolCallCompleted(let record):
-                    records.append(record)
-                    stream.emit(.toolResult(record))
-                case .completed(let completed): response = completed
-                default: break
-                }
-            }
-            guard let response else { throw AgentError(.generationFailed, "The turn ended without a reply.") }
-            let memory = memoryStore.commit(maxFacts: setup.options.maxFacts)
-            let reply = setup.schema == nil
-                ? Self.parseTextReply(response.text, persona: setup.persona)
-                : Self.parseReply(response.structured, persona: setup.persona, options: setup.options)
-            var turn = DialogueTurn(
-                line: reply.line, emotion: reply.emotion, playerOptions: reply.playerOptions,
-                endsConversation: reply.endsConversation, toolCalls: response.toolCalls,
-                relationship: memory.relationship, isFallback: false, usage: response.usage)
-            if turn.line.isEmpty {
-                turn.line = nextFallbackLine(setup.options)
-                turn.isFallback = true
-            }
-            // Queue compaction before handing the turn over, so anything the
-            // caller queues next (a turn, a save) runs after it.
-            scheduleCompactionIfNeeded(setup.options)
-            tracker.finish(line: turn.line, emotion: turn.emotion, emit: stream.emit)
-            stream.finish(turn)
-        } catch {
-            memoryStore.discardPending()
-            let error = AgentError(error)
-            guard setup.options.fallbackOnGuardrail, error.code == .guardrailViolation || error.code == .refusal else {
-                stream.fail(error)
+        var attempt = setup
+        var retriedAsText = false
+        while true {
+            let run = attempt.schema.map { agent.run(attempt.prompt, schema: $0, policy: attempt.policy) }
+                ?? agent.run(attempt.prompt, policy: attempt.policy)
+            guard stream.attach(run) else {
+                _ = try? await run.response()
+                stream.fail(AgentError(.cancelled, "The turn was cancelled."))
                 return
             }
-            let turn = DialogueTurn(
-                line: nextFallbackLine(setup.options), emotion: setup.persona.defaultEmotion,
-                playerOptions: [], endsConversation: false, toolCalls: records,
-                relationship: memoryStore.memory.relationship, isFallback: true)
-            tracker.finish(line: turn.line, emotion: turn.emotion, emit: stream.emit)
-            stream.finish(turn)
+            do {
+                var response: AgentResponse?
+                for try await event in run {
+                    switch event {
+                    case .partial(let json): tracker.consume(json, emit: stream.emit)
+                    case .text(_, let text, _):
+                        if let partial = Self.partialTextReply(text) { tracker.consume(partial, emit: stream.emit) }
+                    case .toolCallStarted(let call): stream.emit(.toolCall(call))
+                    case .toolCallRequested(let call): stream.emit(.externalToolCall(call))
+                    case .toolCallCompleted(let record):
+                        records.append(record)
+                        stream.emit(.toolResult(record))
+                    case .completed(let completed): response = completed
+                    default: break
+                    }
+                }
+                guard let response else { throw AgentError(.generationFailed, "The turn ended without a reply.") }
+                let memory = memoryStore.commit(maxFacts: attempt.options.maxFacts)
+                let reply = attempt.schema == nil
+                    ? Self.parseTextReply(response.text, persona: attempt.persona)
+                    : Self.parseReply(response.structured, persona: attempt.persona, options: attempt.options)
+                var turn = DialogueTurn(
+                    line: reply.line, emotion: reply.emotion, playerOptions: reply.playerOptions,
+                    endsConversation: reply.endsConversation, toolCalls: records,
+                    relationship: memory.relationship, isFallback: false, usage: response.usage)
+                if turn.line.isEmpty {
+                    turn.line = nextFallbackLine(attempt.options)
+                    turn.isFallback = true
+                }
+                // Queue compaction before handing the turn over, so anything the
+                // caller queues next (a turn, a save) runs after it.
+                scheduleCompactionIfNeeded(attempt.options)
+                tracker.finish(line: turn.line, emotion: turn.emotion, emit: stream.emit)
+                stream.finish(turn)
+                return
+            } catch {
+                memoryStore.discardPending()
+                let error = AgentError(error)
+                let blocked = error.code == .guardrailViolation || error.code == .refusal
+                if blocked, attempt.options.replyFormat == .automatic, attempt.schema != nil, !retriedAsText, !stream.isCancelled {
+                    // Guided generation trips the guardrails far more often
+                    // than plain text: retry once as text, tools off.
+                    retriedAsText = true
+                    attempt.schema = nil
+                    attempt.prompt = Self.textRetryPrompt(attempt.prompt, toolRecords: records)
+                    attempt.policy = ToolPolicy(choice: .none)
+                    continue
+                }
+                guard attempt.options.fallbackOnGuardrail, blocked else {
+                    stream.fail(error)
+                    return
+                }
+                let turn = DialogueTurn(
+                    line: nextFallbackLine(attempt.options), emotion: attempt.persona.defaultEmotion,
+                    playerOptions: [], endsConversation: false, toolCalls: records,
+                    relationship: memoryStore.memory.relationship, isFallback: true)
+                tracker.finish(line: turn.line, emotion: turn.emotion, emit: stream.emit)
+                stream.finish(turn)
+                return
+            }
         }
     }
 
@@ -370,7 +386,7 @@ public final class NPC: Sendable {
         let worldSummary = world.map { $0.summary(of: options.worldContextPaths) }
         return TurnSetup(
             prompt: Self.prompt(playerLine: playerLine, context: context, worldSummary: worldSummary),
-            schema: options.replyFormat == .structured ? Self.replySchema(persona: persona, options: options) : nil,
+            schema: options.replyFormat == .text ? nil : Self.replySchema(persona: persona, options: options),
             policy: ToolPolicy(choice: choice, maxToolRounds: options.maxToolRounds, maxToolCalls: options.maxToolCalls),
             persona: persona,
             options: options)

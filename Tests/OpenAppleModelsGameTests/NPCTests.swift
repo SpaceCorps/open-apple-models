@@ -341,7 +341,7 @@ import Testing
         ])
         let npc = try NPC(
             persona: Fixtures.gorm, model: ScriptedLanguageModel(script),
-            options: NPCOptions(memoryTools: .changeRelationship, fallbackLines: ["Watch your tongue."]))
+            options: NPCOptions(memoryTools: .changeRelationship, replyFormat: .structured, fallbackLines: ["Watch your tongue."]))
         _ = try await npc.talk("Hello")
         let historyBefore = npc.transcript.count
 
@@ -364,7 +364,7 @@ import Testing
 
     @Test func guardrailFallbackInStreamingReplacesPartialText() async throws {
         let script = ModelScript([Fixtures.guardrail])
-        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script))
+        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script), options: NPCOptions(replyFormat: .structured))
         var displayed = ""
         var final: DialogueTurn?
         for try await event in npc.talkStream("<blocked>") {
@@ -382,7 +382,7 @@ import Testing
 
     @Test func guardrailThrowsWhenFallbackDisabled() async throws {
         let script = ModelScript([.fail(LanguageModelError.refusal(.init(explanation: "No.", debugDescription: "refused")))])
-        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script), options: NPCOptions(fallbackOnGuardrail: false))
+        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script), options: NPCOptions(replyFormat: .structured, fallbackOnGuardrail: false))
         do {
             _ = try await npc.talk("x")
             Issue.record("expected an error")
