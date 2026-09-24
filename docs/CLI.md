@@ -108,7 +108,15 @@ oam respond [<prompt> ...] [-i <text>] [--tools <file>] [--tool-choice <choice>]
 alone when there are no arguments): `cat notes.txt | oam respond 'Summarize:'`. `--no-stdin`
 never reads it. `--image photo.jpg` (repeatable) attaches images.
 
-**Tools.** `--tools <file>` (above). `--tool-choice`:
+**Tools.** `--tools <file>` (above), and/or `--tool-json '<definition>'` (repeatable) for one-off inline tools:
+
+```sh
+oam respond 'How many potions do I have?' --tool-choice required \
+  --tool-json '{"name":"get_potions","description":"Count potions in the inventory","parameters":{"type":"object","properties":{}}}'
+# exit 10: {"status":"tool_calls","calls":[{"id":"…","name":"get_potions","arguments":{}}],"transcript":"…"}
+```
+
+`--tool-choice`:
 
 | Value | Effect |
 |---|---|

@@ -55,10 +55,37 @@ struct ToolFlags: ParsableArguments {
         if let maxToolCalls, maxToolCalls < 0 { throw ValidationError("--max-tool-calls must be 0 or more.") }
     }
 
-    /// Loads the tools file, if given.
+    @Option(name: .customLong("tool-json"), help: ArgumentHelp(
+        "An inline tool definition as JSON (OpenAI format or {\"name\", \"description\", \"parameters\"}), repeatable; combined with --tools. Tools without an x-oam command are external.",
+        valueName: "json"))
+    var toolJSON: [String] = []
+
+    /// Loads the tools file and inline `--tool-json` definitions, if any.
     func loadTools() throws(CLIError) -> ToolSet? {
-        guard let tools else { return nil }
-        return try ToolFile.load(tools)
+        var set: ToolSet?
+        if let tools { set = try ToolFile.load(tools) }
+        guard !toolJSON.isEmpty else { return set }
+        var values: [JSONValue] = []
+        for (index, text) in toolJSON.enumerated() {
+            let value: JSONValue
+            do {
+                value = try JSONValue(parsing: text)
+            } catch {
+                throw .invalidInput("--tool-json #\(index + 1): \(error.description)")
+            }
+            if let array = value.arrayValue { values.append(contentsOf: array) } else { values.append(value) }
+        }
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let inline = try ToolFile.parse(.array(values), baseDirectory: cwd, source: "--tool-json")
+        guard var merged = set else { return inline }
+        for spec in inline.specs {
+            guard !merged.names.contains(spec.name) else {
+                throw .invalidInput("--tool-json: tool '\(spec.name)' is also defined in \(tools ?? "the tools file").")
+            }
+            merged.specs.append(spec)
+        }
+        merged.warnings.append(contentsOf: inline.warnings)
+        return merged
     }
 
     /// The parsed `--tool-choice`, validated against the available tools.
