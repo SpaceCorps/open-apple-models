@@ -6,7 +6,7 @@
 
 macOS 27 ships Apple's `fm` CLI and an OpenAI-style `fm serve`, but neither returns tool calls. `fm serve` injects your tools and then never emits `tool_calls` (0 of 54 in our tests), and `tool_choice: "required"` returns HTTP 500. In Swift, the obvious switch, `toolCallingMode: .required`, makes the model call tools forever. This package makes the on-device model a reliable agent:
 
-- **Per-step tool control.** Require a tool on the first step and answer afterwards, force a named tool, cap rounds and calls, and hide tools when they're disallowed. It works with any FoundationModels `LanguageModel`.
+- **Per-step tool control.** Require a tool on the first step and answer afterwards, force a named tool, or use `.explicit`: the model must call a tool or declare it needs none, which picked the right action 8/8 vs 7/8 for `auto`. It also caps rounds and calls and hides tools when they're disallowed, and works with any FoundationModels `LanguageModel`.
 - **Runtime tools from JSON Schema.** A tool is either a local Swift closure or an **external** tool executed by your host: the game engine, a script, or an HTTP client.
 - **Game AI.** NPC dialogue with memory, relationships, world-state tools and guardrail-aware fallbacks, plus enum-constrained decisions and content generation.
 - **Every integration path.** A Swift package for iOS, iPadOS, macOS and visionOS; an `oam` CLI ("`fm` with tools"); an OpenAI-compatible server with working `tool_calls`; and a JSON-RPC protocol over stdio or a C ABI for Unity, Godot, Unreal and Python.

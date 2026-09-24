@@ -58,6 +58,16 @@ The test prompts clearly needed a tool (weather, inventory, dice rolls):
 - **Required on the first step, then answer:** exactly one call and a grounded answer (2 of 2, about 2.3 s). The same with a named tool.
 - **After the budget:** disallowing tools and hiding their definitions gives real answers.
 
+**Choosing when to call a tool.** Eight tavern lines were tried, each with a known right action: menu lookup, order, or small talk.
+
+| First-step policy | Right action | Avg latency |
+|---|---|---|
+| `auto` | 7/8 (skipped the menu for "What can I buy from you?") | 1.2 s |
+| `required` + a no-op `respond_directly` tool (`ToolChoice.explicit`) | 8/8 | 1.5 s |
+| Separate routing call (enum decision), then forced tool | 8/8 | 1.6 s |
+
+Wording matters as much as policy. A side-effecting tool named `serve_item` ("serve something the player orders or buys") was called for "What can I buy?". Renamed to `take_order` ("the player has just ordered…"), it was chosen correctly 3/3 times. Putting "name the specific facts the tool gave" into the structured `line` field's description took full menu listings from about 1 in 3 to 4 of 4. Guided generation follows field descriptions closely.
+
 Apple's own route to the same result is a dynamic profile whose `.toolCallingMode` flips inside `onToolOutput` (15 of 15 in our probe). That needs `@Observable` state and profile types. The wrapper works with any session and model, and no macros are needed.
 
 ## 4. Context, latency and usage

@@ -149,7 +149,7 @@ extension NPC {
         }
         let sentences = max(1, persona.maxSentences)
         var properties: [(String, JSONValue)] = [
-            ("emotion", JSONSchema.string(description: "How \(persona.name) feels right now.", enum: emotions).json),
+            ("emotion", JSONSchema.string(description: "How \(persona.name) feels right now, given their personality and what the player just said. Use neutral only when no feeling fits.", enum: emotions).json),
             ("line", JSONSchema.string(description: "What \(persona.name) says out loud, in character. At most \(sentences) short \(sentences == 1 ? "sentence" : "sentences"). If a tool was just used, name the specific facts it gave (items, prices, numbers).").json),
         ]
         let count = min(max(options.playerOptionCount, 0), 4)

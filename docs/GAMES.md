@@ -191,7 +191,8 @@ paid 45 gold"). The player's words are always framed as `Player: …` (see
 
 | Setting | Behavior | Cost |
 | --- | --- | --- |
-| `toolChoice: .auto` (default) | The model decides. It often skips tools and invents facts: in one probe it answered "Two gold for one" for a 45-gold sword | fastest |
+| `toolChoice: .explicit` (default) | On the first step the model must either call a tool or pick a built-in `respond_directly` tool ("no lookup needed"). In a tavern probe it picked the right action 8/8 times, against 7/8 for `.auto`, which skipped the menu for "What can I buy?" | ~+0.3 s |
+| `toolChoice: .auto` | The model decides. It often skips tools and invents facts: in one probe it answered "Two gold for one" for a 45-gold sword | fastest |
 | `groundingTool: "check_inventory"` | That tool is forced on the first step of every turn. Later steps are free, so there are no tool loops | +1 tool round (~1–3 s) |
 | `toolChoice: .required` | Some tool is forced first | +1 tool round |
 | `talk(…, toolChoice: .none/.auto/…)` | Per-turn override, for example `.auto` for a goodbye | — |
@@ -199,7 +200,11 @@ paid 45 gold"). The player's words are always framed as `Player: …` (see
 
 Rule of thumb: put small, always-relevant facts in `worldContextPaths`.
 Use a `groundingTool` for lookups the NPC is asked about every turn, such
-as stock or prices. Leave other tools on `.auto`. Keep the total tool count
+as stock or prices. Otherwise keep the default, `.explicit`. Name and
+describe action tools by the player's intent ("take_order: the player has
+just ordered…"), not by the transaction ("serve an item the player buys").
+In the tavern demo, `serve_item` was called for "What can I buy?", while
+`take_order` was chosen correctly 3/3 times. Keep the total tool count
 around three to five; Apple recommends that for the on-device model.
 
 ### Streaming (typewriter)

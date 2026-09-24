@@ -115,6 +115,7 @@ never reads it. `--image photo.jpg` (repeatable) attaches images.
 | `auto` (default) | the model decides |
 | `none` | tools disabled for this turn |
 | `required` | the model must call a tool on its **first** step, then answers freely |
+| `explicit` | the model must either call a tool or state it needs none (a built-in `respond_directly` tool), then answers; grounds lookups reliably without forcing pointless calls on small talk |
 | `<tool name>` | the model must call that tool first, then answers freely |
 
 The small model often answers from memory in `auto` mode. When the answer must come from a tool,
