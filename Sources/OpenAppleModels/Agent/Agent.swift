@@ -378,6 +378,7 @@ public final class Agent: Sendable {
 
     private func perform(prompt: Prompt, format: OutputFormat, run: AgentRun) async {
         let turn = run.context
+        guard turn.markStarted() else { return }   // cancelled while queued
         guard !Task.isCancelled else {
             turn.finish(with: .failure(AgentError(.cancelled, "The turn was cancelled before it started.")))
             return
@@ -436,7 +437,11 @@ public final class Agent: Sendable {
                     return
                 }
                 attempt += 1
-                try? await Task.sleep(for: delay)
+                var wait = delay
+                if let resetDate = failure.retryAfter {
+                    wait = max(wait, .milliseconds(Int(max(0, resetDate.timeIntervalSinceNow) * 1000)))
+                }
+                try? await Task.sleep(for: wait)
                 delay *= 2
             }
         }

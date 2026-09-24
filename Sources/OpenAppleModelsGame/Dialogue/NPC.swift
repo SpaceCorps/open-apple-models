@@ -333,18 +333,20 @@ public final class NPC: Sendable {
                 stream.finish(turn)
                 return
             } catch {
-                memoryStore.discardPending()
                 let error = AgentError(error)
                 let blocked = error.code == .guardrailViolation || error.code == .refusal
                 if blocked, attempt.options.replyFormat == .automatic, attempt.schema != nil, !retriedAsText, !stream.isCancelled {
                     // Guided generation trips the guardrails far more often
-                    // than plain text: retry once as text, tools off.
+                    // than plain text: retry once as text, tools off. Memory
+                    // changes staged by tools that already ran stay staged and
+                    // are committed if the retry succeeds.
                     retriedAsText = true
                     attempt.schema = nil
                     attempt.prompt = Self.textRetryPrompt(attempt.prompt, toolRecords: records)
                     attempt.policy = ToolPolicy(choice: .none)
                     continue
                 }
+                memoryStore.discardPending()
                 guard attempt.options.fallbackOnGuardrail, blocked else {
                     stream.fail(error)
                     return

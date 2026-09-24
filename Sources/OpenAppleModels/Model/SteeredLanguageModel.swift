@@ -238,8 +238,11 @@ public final class StepController: Sendable {
         let head = entries.first.map { if case .instructions = $0 { 1 } else { 0 } } ?? 0
         let promptIndices = entries.indices.filter { if case .prompt = entries[$0] { true } else { false } }
         // Turn boundaries we may cut at, keeping the most recent turns.
-        let keepFrom = promptIndices.count > policy.minimumRecentTurns
-            ? promptIndices[promptIndices.count - policy.minimumRecentTurns]
+        // Never cut into the turn in progress (the last prompt), and keep at
+        // least `minimumRecentTurns` complete turns before it when possible.
+        let keepTurns = max(1, policy.minimumRecentTurns)
+        let keepFrom = promptIndices.count >= keepTurns
+            ? promptIndices[promptIndices.count - keepTurns]
             : (promptIndices.first ?? head)
         let cutPoints = promptIndices.filter { $0 > head && $0 <= keepFrom }
 

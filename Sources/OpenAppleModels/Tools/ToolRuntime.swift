@@ -14,6 +14,7 @@ final class TurnContext: Sendable {
         var pending: [String: (call: ToolCall, resume: CheckedContinuation<ToolOutput, Never>)] = [:]
         var records: [ToolRecord] = []
         var steps: [ModelStep] = []
+        var started = false
         var finished = false
     }
 
@@ -44,6 +45,24 @@ final class TurnContext: Sendable {
         case .failure(let error):
             continuation.finish(throwing: error)
         }
+    }
+
+    /// Marks the turn as running. Returns false if it already ended (e.g. it
+    /// was cancelled while queued).
+    func markStarted() -> Bool {
+        state.withLock { state in
+            guard !state.finished else { return false }
+            state.started = true
+            return true
+        }
+    }
+
+    /// Ends a turn that has not started yet. Returns false if it is running
+    /// (it will finish itself, after rolling back) or already ended.
+    func finishIfNotStarted(with error: AgentError) -> Bool {
+        let shouldFinish = state.withLock { !$0.started && !$0.finished }
+        if shouldFinish { finish(with: .failure(error)) }
+        return shouldFinish
     }
 
     /// Increments the call counter; returns false when over budget.
@@ -159,22 +178,25 @@ final class ToolRuntime: Sendable {
         return await withTimeout(timeout, call: call, body)
     }
 
+    /// Races `body` against a timer. Unlike a task group, this returns as soon
+    /// as either finishes, even if `body` ignores cancellation (it is
+    /// cancelled and left to finish on its own).
     private static func withTimeout(_ timeout: Duration, call: ToolCall, _ body: @escaping @Sendable () async -> ToolOutput) async -> ToolOutput {
-        await withTaskGroup(of: ToolOutput?.self) { group in
-            group.addTask { await body() }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return Task.isCancelled ? nil : .error("Tool '\(call.name)' timed out after \(timeout.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow))).")
-            }
-            var result: ToolOutput = .error("Tool '\(call.name)' produced no output.")
-            for await value in group {
-                if let value {
-                    result = value
-                    break
+        let race = FirstResult<ToolOutput>()
+        return await withTaskCancellationHandler {
+            await race.wait { race in
+                let work = Task { race.deliver(await body()) }
+                let timer = Task {
+                    try? await Task.sleep(for: timeout)
+                    race.deliver(.error("Tool '\(call.name)' timed out after \(timeout.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))."))
+                }
+                race.onDelivery {
+                    work.cancel()
+                    timer.cancel()
                 }
             }
-            group.cancelAll()
-            return result
+        } onCancel: {
+            race.deliver(.error("The tool call was cancelled."))
         }
     }
 
@@ -198,5 +220,55 @@ struct ToolAdapter: Tool {
 
     func call(arguments: GeneratedContent) async throws -> String {
         try await runtime.invoke(tool, arguments: arguments)
+    }
+}
+
+/// A one-shot rendezvous: the first delivered value wins and resumes the waiter.
+final class FirstResult<Value: Sendable>: Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<Value, Never>?
+        var value: Value?
+        var cleanup: [@Sendable () -> Void] = []
+        var done = false
+    }
+
+    private let state = Mutex(State())
+
+    /// Suspends until a value is delivered. `start` runs once the waiter is
+    /// installed (deliveries before that are kept and returned immediately).
+    func wait(_ start: (FirstResult<Value>) -> Void) async -> Value {
+        await withCheckedContinuation { continuation in
+            let early: Value? = state.withLock { state in
+                if let value = state.value { return value }
+                state.continuation = continuation
+                return nil
+            }
+            if let early {
+                continuation.resume(returning: early)
+                return
+            }
+            start(self)
+        }
+    }
+
+    func onDelivery(_ cleanup: @escaping @Sendable () -> Void) {
+        let runNow = state.withLock { state in
+            if state.done { return true }
+            state.cleanup.append(cleanup)
+            return false
+        }
+        if runNow { cleanup() }
+    }
+
+    func deliver(_ value: Value) {
+        let (continuation, cleanup) = state.withLock { state -> (CheckedContinuation<Value, Never>?, [@Sendable () -> Void]) in
+            guard !state.done else { return (nil, []) }
+            state.done = true
+            if state.continuation == nil { state.value = value }
+            defer { state.continuation = nil; state.cleanup = [] }
+            return (state.continuation, state.cleanup)
+        }
+        continuation?.resume(returning: value)
+        cleanup.forEach { $0() }
     }
 }

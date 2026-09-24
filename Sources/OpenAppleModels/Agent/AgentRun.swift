@@ -52,6 +52,9 @@ public final class AgentRun: AsyncSequence, Sendable {
     public func cancel() {
         context.cancelPending(reason: "The turn was cancelled.")
         task.withLock { $0?.cancel() }
+        // A turn still queued behind another ends now; a running turn ends
+        // once it has rolled back its partial work.
+        _ = context.finishIfNotStarted(with: AgentError(.cancelled, "The turn was cancelled."))
     }
 
     /// Consumes the events and returns the final response.
@@ -62,6 +65,22 @@ public final class AgentRun: AsyncSequence, Sendable {
     public func response(
         externalTools: (@Sendable (ToolCall) async throws -> ToolOutput)? = nil
     ) async throws(AgentError) -> AgentResponse {
+        // Cancelling the awaiting task cancels the turn.
+        let result: Result<AgentResponse, AgentError> = await withTaskCancellationHandler {
+            do {
+                return .success(try await consume(externalTools: externalTools))
+            } catch {
+                return .failure(AgentError(error))
+            }
+        } onCancel: {
+            self.cancel()
+        }
+        return try result.get()
+    }
+
+    private func consume(
+        externalTools: (@Sendable (ToolCall) async throws -> ToolOutput)?
+    ) async throws -> AgentResponse {
         do {
             for try await event in self {
                 switch event {
@@ -84,6 +103,7 @@ public final class AgentRun: AsyncSequence, Sendable {
         } catch {
             throw AgentError(error)
         }
+        if Task.isCancelled { throw AgentError(.cancelled, "The turn was cancelled.") }
         throw AgentError(.generationFailed, "The turn ended without a response.")
     }
 }

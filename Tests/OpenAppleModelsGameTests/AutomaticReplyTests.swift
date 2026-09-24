@@ -111,3 +111,19 @@ struct LiveAutomaticReplyTests {
         #expect(fallbacks < Self.lines.count)
     }
 }
+
+@Suite struct AutomaticReplyMemoryTests {
+    @Test func memoryStagedBeforeTheBlockSurvivesTheTextRetry() async throws {
+        let script = ModelScript([
+            .toolCalls([.init(name: "change_relationship", arguments: ["reason": "kind words", "delta": 5])]),
+            Fixtures.guardrail,
+            .text("[happy] Kind of you, lad."),
+        ])
+        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script),
+                          options: NPCOptions(memoryTools: .changeRelationship))
+        let turn = try await npc.talk("You're the finest smith alive!")
+        #expect(!turn.isFallback)
+        #expect(turn.relationship == 5)
+        #expect(npc.memory.relationship == 5)
+    }
+}

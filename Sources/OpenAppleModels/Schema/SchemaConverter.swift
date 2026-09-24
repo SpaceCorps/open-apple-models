@@ -208,10 +208,16 @@ public struct SchemaConverter {
     }
 
     private mutating func buildInteger(_ schema: JSONObject, path: String) -> Built {
-        var lower = schema["minimum"]?.doubleValue.map { Int(($0).rounded(.up)) }
-        var upper = schema["maximum"]?.doubleValue.map { Int(($0).rounded(.down)) }
-        if let exclusive = schema["exclusiveMinimum"]?.doubleValue { lower = max(lower ?? .min, Int(exclusive.rounded(.down)) + 1) }
-        if let exclusive = schema["exclusiveMaximum"]?.doubleValue { upper = min(upper ?? .max, Int(exclusive.rounded(.up)) - 1) }
+        var lower = schema["minimum"]?.doubleValue.map { Self.clampedInt($0.rounded(.up)) }
+        var upper = schema["maximum"]?.doubleValue.map { Self.clampedInt($0.rounded(.down)) }
+        if let exclusive = schema["exclusiveMinimum"]?.doubleValue {
+            let bound = Self.clampedInt(exclusive.rounded(.down))
+            lower = max(lower ?? .min, bound == .max ? .max : bound + 1)
+        }
+        if let exclusive = schema["exclusiveMaximum"]?.doubleValue {
+            let bound = Self.clampedInt(exclusive.rounded(.up))
+            upper = min(upper ?? .max, bound == .min ? .min : bound - 1)
+        }
         var guides: [GenerationGuide<Int>] = []
         switch (lower, upper) {
         case let (lower?, upper?) where lower <= upper: guides.append(.range(lower...upper))
@@ -373,6 +379,14 @@ public struct SchemaConverter {
             }
         }
         return node
+    }
+
+    /// Converts without trapping: NaN becomes 0, out-of-range values clamp.
+    static func clampedInt(_ value: Double) -> Int {
+        guard !value.isNaN else { return 0 }
+        if value >= Double(Int.max) { return .max }
+        if value <= Double(Int.min) { return .min }
+        return Int(value)
     }
 
     private static func lastComponent(of ref: String) -> String {
