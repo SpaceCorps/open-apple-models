@@ -137,8 +137,42 @@ FoundationModels runs the tool loop inside one `respond()` call, and its tool-ca
 
 ## Games
 
-<!-- filled from the game layer -->
-See [docs/GAMES.md](docs/GAMES.md).
+```swift
+import OpenAppleModelsGame
+
+let world = WorldState(["player": ["name": "Aria", "gold": 60], "time_of_day": "evening"])
+
+let gorm = try NPC(
+    persona: Persona(
+        name: "Gorm", role: "the village blacksmith",
+        personality: "Gruff and proud, but fair", speakingStyle: "Short, blunt sentences. Calls people 'lad'."),
+    tools: [inventory],                        // any AgentTool, local or external
+    world: world,                              // adds read_world_state
+    options: NPCOptions(
+        groundingTool: "check_inventory",      // must look up stock before answering
+        worldContextPaths: ["player.name", "player.gold", "time_of_day"]))
+
+let turn = try await gorm.talk("Evening! Got any iron swords? How much?")
+turn.emotion        // .neutral
+turn.line           // "Aria, I've got three iron swords for 45 gold. Take one if you're keen."
+turn.playerOptions  // ["Buy one now.", "What else do you need?", "Fancy a different weapon?"]
+
+// Typewriter streaming
+for try await event in gorm.talkStream("Can I afford a shield too?") {
+    if case .lineDelta(let text) = event { dialogueBox.append(text) }
+}
+
+// Enemy AI: always returns one of your option ids
+let decision = try await DecisionEngine().decide(
+    situation: "The player, at full health, charges Snik with a flaming sword.",
+    options: [DecisionOption(id: "flee", description: "Run into the tunnels"),
+              DecisionOption(id: "attack", description: "Stab with the rusty dagger"),
+              DecisionOption(id: "beg", description: "Beg for mercy and offer loot")],
+    actor: Persona(name: "Snik", role: "a timid, greedy goblin"))
+decision.optionID   // "flee" (confidence 75, reasoning included)
+```
+
+NPCs have memory (facts and a relationship score, both managed by tools), automatic history compaction, secrets that unlock as the relationship grows, barks, and Codable save/restore. Guardrail-blocked turns are retried as plain text before falling back to a canned line. `ContentGenerator` produces schema-shaped items, quests and loot. See [docs/GAMES.md](docs/GAMES.md) for the guide, prompting tips for the ~3B model, and measured latencies.
 
 ## CLI: `oam`
 
@@ -147,13 +181,46 @@ See [docs/CLI.md](docs/CLI.md).
 
 ## OpenAI-compatible server
 
-<!-- filled from the server -->
-See [docs/SERVER.md](docs/SERVER.md).
+A drop-in replacement for `fm serve` whose `tool_calls` actually work. It supports `tool_choice` (`auto`, `none`, `required` and named functions), parallel calls, streaming, `response_format` JSON schemas, stop sequences, images, and OpenAI-style errors.
+
+```swift
+import OpenAppleModelsServer
+
+let server = OpenAIServer(configuration: ServerConfiguration(port: 1976))
+try await server.start()      // http://127.0.0.1:1976/v1/chat/completions
+```
+
+```bash
+curl -s http://127.0.0.1:1976/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "system",
+  "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+  "tools": [{"type": "function", "function": {"name": "get_weather", "description": "Current weather for a city.",
+             "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}],
+  "tool_choice": "required"}'
+# → finish_reason "tool_calls", tool_calls: [{"function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]
+```
+
+Any OpenAI client works when you point `base_url` at `http://127.0.0.1:1976/v1`. The server is stateless: send the tool results back as `role: "tool"` messages, as you would with OpenAI. [docs/SERVER.md](docs/SERVER.md) compares every feature with `fm serve`.
 
 ## Game engines and other languages
 
-<!-- filled from the bridge -->
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) and [bindings/](bindings/).
+One JSON-RPC 2.0 protocol, two transports: newline-delimited JSON over **stdio** (`oam stdio`), and a **C ABI** (`libOpenAppleModelsFFI`) for Unity (including iOS via `__Internal`), Godot, Unreal, Python and .NET. The model decides to call a tool, the bridge sends your engine a `tool/call` request, and your engine replies with the result:
+
+```text
+→ {"jsonrpc":"2.0","id":2,"method":"session/create","params":{"session":"guard","instructions":"You are a castle guard. Use tools to act.","tools":[{"name":"open_gate","description":"Open a named gate.","parameters":{"type":"object","properties":{"gate":{"type":"string"}}}}],"options":{"toolChoice":"required"}}}
+→ {"jsonrpc":"2.0","id":3,"method":"session/respond","params":{"session":"guard","prompt":"Please open the north gate.","stream":true}}
+← {"jsonrpc":"2.0","id":"t-1","method":"tool/call","params":{"session":"guard","call":{"id":"call_NYH7…","name":"open_gate","arguments":{"gate":"north"}}}}
+→ {"jsonrpc":"2.0","id":"t-1","result":{"output":{"opened":false,"reason":"the portcullis chain is jammed"}}}
+← {"jsonrpc":"2.0","method":"session/event","params":{"session":"guard","event":{"type":"text","delta":"The north gate",…}}}
+← {"jsonrpc":"2.0","id":3,"result":{"text":"The north gate remains shut because the portcullis chain is jammed.",…}}
+```
+
+```c
+oam_bridge *bridge = oam_bridge_create(on_message, game);   // on_message receives JSON lines
+oam_bridge_send(bridge, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+```
+
+The bridge also exposes NPCs, decisions and world state (`npc/*`, `decision/*`, `world/*`), and a scripted model for CI machines without Apple Intelligence. See [docs/PROTOCOL.md](docs/PROTOCOL.md) and [bindings/](bindings/) (C header, Python, Unity C#).
 
 ## Testing without Apple Intelligence
 
