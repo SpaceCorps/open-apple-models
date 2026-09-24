@@ -55,6 +55,9 @@ enum Fixtures {
 }
 
 extension ModelScript.ModelRequest {
+    /// Enabled tools other than the built-in `respond_directly`.
+    var userTools: [String] { enabledTools.filter { $0 != AgentTool.respondDirectlyName } }
+
     /// Text of the instructions entry the model saw.
     var instructionsText: String {
         for entry in transcript {

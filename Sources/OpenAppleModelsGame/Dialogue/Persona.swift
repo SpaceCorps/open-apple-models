@@ -124,6 +124,7 @@ public struct Persona: Sendable, Hashable, Codable {
         lines.append("- Reply in at most \(limit) short \(limit == 1 ? "sentence" : "sentences").")
         if usesTools {
             lines.append("- Use your tools to check facts about the world, such as items, prices, people and places. Never invent them.")
+            lines.append("- When a tool gives you facts, say the specific ones the player asked about (names, prices, numbers).")
         } else {
             lines.append("- If you do not know a fact about the world, say so in character. Never invent it.")
         }

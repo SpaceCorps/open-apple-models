@@ -40,7 +40,7 @@ struct ToolFlags: ParsableArguments {
     var tools: String?
 
     @Option(name: .customLong("tool-choice"), help: ArgumentHelp(
-        "auto, none, required, or a tool name. required/<name> force a tool call on the first step only.",
+        "auto, none, required, explicit, or a tool name. required/<name> force a tool call on the first step only; explicit makes the model either call a tool or state it needs none.",
         valueName: "choice"))
     var toolChoice: String?
 
@@ -67,13 +67,15 @@ struct ToolFlags: ParsableArguments {
         switch toolChoice {
         case "auto": return .auto
         case "none": return ToolChoice.none
+        case "explicit":
+            return .explicit
         case "required", "any":
             guard !toolNames.isEmpty else { throw .usage("--tool-choice required needs tools (--tools).") }
             return .required
         default:
             guard toolNames.contains(toolChoice) else {
                 let known = toolNames.isEmpty ? "no tools are defined" : "tools: " + toolNames.joined(separator: ", ")
-                throw .usage("--tool-choice '\(toolChoice)' is not auto, none, required or a tool name (\(known)).")
+                throw .usage("--tool-choice '\(toolChoice)' is not auto, none, required, explicit or a tool name (\(known)).")
             }
             return .tool(toolChoice)
         }
@@ -96,6 +98,7 @@ extension ToolChoice {
         case .auto: "auto"
         case .none: "none"
         case .required: "required"
+        case .explicit: "explicit"
         case .tool(let name): name
         }
     }

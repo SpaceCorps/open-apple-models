@@ -212,7 +212,34 @@ public final class Agent: Sendable {
     /// The full conversation, including instructions and tool calls.
     /// `Transcript` is `Codable`: encode it to save a conversation and pass it
     /// back as `history` to resume.
-    public var transcript: Transcript { state.withLock { $0.session.transcript } }
+    public var transcript: Transcript { Self.publicView(state.withLock { $0.session.transcript }) }
+
+    /// The transcript without the built-in `respond_directly` tool (its
+    /// definition, calls and outputs), which is an implementation detail of
+    /// ``ToolChoice/explicit``.
+    static func publicView(_ transcript: Transcript) -> Transcript {
+        let hidden = AgentTool.respondDirectlyName
+        var entries: [Transcript.Entry] = []
+        for entry in transcript {
+            switch entry {
+            case .instructions(var instructions):
+                instructions.toolDefinitions.removeAll { $0.name == hidden }
+                entries.append(.instructions(instructions))
+            case .toolCalls(let calls):
+                let kept = calls.filter { $0.toolName != hidden }
+                if kept.count == calls.count {
+                    entries.append(entry)
+                } else if !kept.isEmpty {
+                    entries.append(.toolCalls(Transcript.ToolCalls(id: calls.id, kept)))
+                }
+            case .toolOutput(let output) where output.toolName == hidden:
+                continue
+            default:
+                entries.append(entry)
+            }
+        }
+        return Transcript(entries: entries)
+    }
 
     /// Conversation entries after the instructions.
     public var history: [Transcript.Entry] { Self.historyEntries(transcript) }
@@ -565,6 +592,9 @@ public final class Agent: Sendable {
         for tool in tools {
             guard !tool.name.isEmpty else { throw AgentError(.invalidRequest, "Tool names must not be empty.") }
             guard seen.insert(tool.name).inserted else { throw AgentError(.invalidRequest, "Duplicate tool name '\(tool.name)'.") }
+            guard tool.name != AgentTool.respondDirectlyName else {
+                throw AgentError(.invalidRequest, "'\(tool.name)' is reserved for ToolChoice.explicit.")
+            }
         }
     }
 
@@ -576,6 +606,9 @@ public final class Agent: Sendable {
         tools: [AgentTool],
         history: [Transcript.Entry]
     ) -> LanguageModelSession {
+        // With any tools, also offer the built-in tool behind ToolChoice.explicit;
+        // the step controller hides it on every step that doesn't use it.
+        let tools = tools.isEmpty ? tools : tools + [AgentTool.respondDirectly]
         func make<Base: LanguageModel>(_ base: Base) -> LanguageModelSession {
             let steered = SteeredLanguageModel(base: base, controller: controller)
             let adapters: [any Tool] = tools.map { ToolAdapter(tool: $0, runtime: runtime) }

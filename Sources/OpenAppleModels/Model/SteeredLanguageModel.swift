@@ -15,6 +15,12 @@ public enum ToolChoice: Sendable, Hashable {
     case required
     /// The model must call the named tool first, then answers freely.
     case tool(String)
+    /// The model must make an explicit decision on the first step: call one
+    /// of the tools, or call a built-in `respond_directly` tool that says no
+    /// lookup is needed. More reliable grounding than ``auto`` (on device, auto
+    /// often skips tools and invents facts) at the cost of one short step;
+    /// unlike ``required`` it never forces a pointless tool call for small talk.
+    case explicit
 }
 
 extension ToolChoice: Codable {
@@ -26,9 +32,10 @@ extension ToolChoice: Codable {
             case "auto": self = .auto
             case "none": self = .none
             case "required", "any": self = .required
+            case "explicit": self = .explicit
             default:
                 throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
-                    debugDescription: "Expected \"auto\", \"none\", \"required\" or {\"tool\": name}, got \"\(text)\"."))
+                    debugDescription: "Expected \"auto\", \"none\", \"required\", \"explicit\" or {\"tool\": name}, got \"\(text)\"."))
             }
             return
         }
@@ -48,6 +55,7 @@ extension ToolChoice: Codable {
         case .auto: var c = encoder.singleValueContainer(); try c.encode("auto")
         case .none: var c = encoder.singleValueContainer(); try c.encode("none")
         case .required: var c = encoder.singleValueContainer(); try c.encode("required")
+        case .explicit: var c = encoder.singleValueContainer(); try c.encode("explicit")
         case .tool(let name):
             var c = encoder.container(keyedBy: Keys.self)
             try c.encode(name, forKey: .tool)
@@ -166,6 +174,10 @@ public final class StepController: Sendable {
         var request = request
         let turn = Self.currentTurn(of: request.transcript)
         let rounds = turn.filter { if case .toolCalls = $0 { true } else { false } }.count
+        // The model already said it can respond without a lookup.
+        let choseToRespond = turn.contains { entry in
+            if case .toolCalls(let calls) = entry { calls.allSatisfy { $0.toolName == AgentTool.respondDirectlyName } } else { false }
+        }
         let calls = turn.reduce(0) { count, entry in
             if case .toolCalls(let calls) = entry { count + calls.count } else { count }
         }
@@ -173,13 +185,20 @@ public final class StepController: Sendable {
         if let enabled = policy.enabledTools {
             request.enabledToolDefinitions.removeAll { !enabled.contains($0.name) }
         }
+        let offersRespondDirectly = policy.choice == .explicit && rounds == 0
+        if !offersRespondDirectly {
+            request.enabledToolDefinitions.removeAll { $0.name == AgentTool.respondDirectlyName }
+            request.transcript = Self.removingToolDefinition(named: AgentTool.respondDirectlyName, from: request.transcript)
+        }
         var mode: GenerationOptions.ToolCallingMode
         switch policy.choice {
         case .none:
             mode = .disallowed
+        case _ where choseToRespond:
+            mode = .disallowed
         case _ where rounds >= policy.maxToolRounds || calls >= policy.maxToolCalls:
             mode = .disallowed
-        case .required where rounds == 0:
+        case .required where rounds == 0, .explicit where rounds == 0:
             mode = .required
         case .tool(let name) where rounds == 0:
             request.enabledToolDefinitions.removeAll { $0.name != name }
@@ -205,9 +224,18 @@ public final class StepController: Sendable {
             index: index,
             completedToolRounds: rounds,
             toolCallingMode: mode.kind,
-            enabledTools: request.enabledToolDefinitions.map(\.name),
+            enabledTools: request.enabledToolDefinitions.map(\.name).filter { $0 != AgentTool.respondDirectlyName },
             trimmedEntries: trimmed))
         return request
+    }
+
+    static func removingToolDefinition(named name: String, from transcript: Transcript) -> Transcript {
+        guard case .instructions(var instructions)? = transcript.first,
+              instructions.toolDefinitions.contains(where: { $0.name == name }) else { return transcript }
+        instructions.toolDefinitions.removeAll { $0.name == name }
+        var entries = Array(transcript)
+        entries[0] = .instructions(instructions)
+        return Transcript(entries: entries)
     }
 
     static func hidingToolDefinitions(_ transcript: Transcript) -> Transcript {

@@ -305,3 +305,60 @@ final class Counter: Sendable {
         }
     }
 }
+
+@Suite struct ExplicitToolChoiceTests {
+    static func menu() throws -> AgentTool {
+        try AgentTool(name: "check_menu", description: "Menu.") { _ in .json([["item": "ale", "price_gold": 2]]) }
+    }
+
+    @Test func respondDirectlySkipsLookupsAndStaysInvisible() async throws {
+        let script = ModelScript([.toolCalls([.init(name: AgentTool.respondDirectlyName)]), .text("Evening, traveler!")])
+        let agent = try Agent(model: ScriptedLanguageModel(script), tools: [try Self.menu()])
+        var events: [String] = []
+        let run = agent.run("Hello!", policy: ToolPolicy(choice: .explicit))
+        for try await event in run {
+            switch event {
+            case .toolCallStarted(let call), .toolCallRequested(let call): events.append(call.name)
+            case .toolCallCompleted(let record): events.append(record.call.name)
+            default: break
+            }
+        }
+        let response = try await agent.respond(to: "again", policy: ToolPolicy(choice: .none))
+        _ = response
+        #expect(events.isEmpty)
+        #expect(script.requests[0].toolCallingMode == .required)
+        #expect(Set(script.requests[0].enabledTools) == ["check_menu", AgentTool.respondDirectlyName])
+        #expect(script.requests[1].toolCallingMode == .disallowed)
+        #expect(script.requests[1].enabledTools.isEmpty)
+    }
+
+    @Test func aRealToolCallThenAnswersNormally() async throws {
+        let script = ModelScript([.toolCalls([.init(name: "check_menu")]), .text("Ale is 2 gold.")])
+        let agent = try Agent(model: ScriptedLanguageModel(script), tools: [try Self.menu()])
+        let response = try await agent.respond(to: "Menu?", policy: ToolPolicy(choice: .explicit))
+        #expect(response.toolCalls.map(\.call.name) == ["check_menu"])
+        #expect(script.requests[1].toolCallingMode == .allowed)
+        #expect(script.requests[1].enabledTools == ["check_menu"])
+        #expect(response.steps[0].enabledTools == ["check_menu"])
+    }
+
+    @Test func otherChoicesNeverSeeTheBuiltInTool() async throws {
+        let script = ModelScript([.text("hi")])
+        let agent = try Agent(model: ScriptedLanguageModel(script), tools: [try Self.menu()])
+        _ = try await agent.respond(to: "hi")
+        #expect(script.requests[0].enabledTools == ["check_menu"])
+        let instructions = script.requests[0].transcript.first.map { "\($0)" } ?? ""
+        #expect(!instructions.contains(AgentTool.respondDirectlyName))
+    }
+
+    @Test func reservedNameIsRejected() throws {
+        #expect(throws: AgentError.self) {
+            _ = try Agent(tools: [try AgentTool(name: AgentTool.respondDirectlyName, description: "x") { _ in "x" }])
+        }
+    }
+
+    @Test func codes() throws {
+        #expect(String(decoding: try JSONEncoder().encode(ToolChoice.explicit), as: UTF8.self) == #""explicit""#)
+        #expect(try JSONDecoder().decode(ToolChoice.self, from: Data(#""explicit""#.utf8)) == .explicit)
+    }
+}

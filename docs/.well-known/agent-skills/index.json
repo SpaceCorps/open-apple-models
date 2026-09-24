@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+  "skills": [
+    {
+      "name": "open-apple-models",
+      "description": "Run on-device Apple Foundation Models with real per-step tool calling, game NPC dialogue with world memory, OpenAI-compatible local server, and Unity/Godot JSON-RPC bridge.",
+      "type": "skill-md",
+      "url": "https://spacecorps.github.io/open-apple-models/llms.txt"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>About · OpenAppleModels</title>
+  <meta name="description" content="About OpenAppleModels: Real tool calling and autonomous agent loops for Apple's on-device Foundation Models.">
+  <link rel="canonical" href="https://spacecorps.github.io/open-apple-models/about.html">
+  <meta property="og:title" content="About · OpenAppleModels">
+  <meta property="og:description" content="Real tool calling and autonomous agent loops for Apple's on-device Foundation Models across iOS, iPadOS, macOS, and visionOS 27.">
+  <meta property="og:url" content="https://spacecorps.github.io/open-apple-models/about.html">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://spacecorps.github.io/open-apple-models/og-image.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="is-agentic-site-type" content="content">
+  <style>
+    body { background: #090d16; color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.7; padding: 40px 20px; }
+    .content-box { max-width: 800px; margin: 0 auto; background: rgba(22, 27, 46, 0.7); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 40px; }
+    h1 { font-size: 2.2rem; margin-bottom: 20px; color: #fff; }
+    h2 { font-size: 1.4rem; margin-top: 30px; margin-bottom: 12px; color: #38bdf8; }
+    p { margin-bottom: 16px; color: #94a3b8; }
+    a { color: #38bdf8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .back { display: inline-block; margin-bottom: 24px; color: #6366f1; font-weight: 500; }
+    code { font-family: "Geist Mono", monospace; background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 4px; color: #e2e8f0; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <div class="content-box">
+    <a href="./" class="back">&larr; Back to OpenAppleModels</a>
+    <h1>About OpenAppleModels</h1>
+    
+    <p>OpenAppleModels is an open-source framework and developer runtime engineered by SpaceCorps that unlocks <strong>real, deterministic tool calling and agent loops</strong> for Apple's on-device Foundation Models. It enables game developers, mobile engineers, and autonomous AI agents to build zero-latency, private AI experiences on iPhone, iPad, Mac, and Apple Vision Pro without API keys or cloud server costs.</p>
+
+    <h2>Why We Built It: The Probing Evidence</h2>
+    <p>macOS 27 introduced Apple's native <code>fm</code> CLI tool and an OpenAI-compatible <code>fm serve</code> local endpoint. However, rigorous probing revealed that <code>fm serve</code> injects your tools but never emits <code>tool_calls</code> (0 of 54 attempts in systematic testing), and setting <code>tool_choice: "required"</code> returns an HTTP 500 error. Within the native Swift <code>FoundationModels</code> framework, setting <code>toolCallingMode: .required</code> causes the model to call tools in an infinite loop without ever generating an answer.</p>
+    <p>SpaceCorps engineered OpenAppleModels to solve these fundamental limitations at the engine level.</p>
+
+    <h2>Core Innovations</h2>
+    <p>OpenAppleModels introduces fine-grained per-step loop control: requiring a tool call on step 1 to ground the response (e.g. checking game inventory or player health), then automatically transitioning to generating natural dialogue or structured JSON. It provides dynamic JSON Schema tool conversion, game NPC personas with episodic memory, an embeddable OpenAI-compatible HTTP server with genuine <code>tool_calls</code> streaming, and a high-performance JSON-RPC 2.0 bridge over stdio and C ABI for Unity, Godot, and Unreal Engine.</p>
+
+    <h2>SpaceCorps Standards</h2>
+    <p>Like every SpaceCorps project, OpenAppleModels is built for zero runtime bloat, uncompromising privacy (100% on-device processing), deterministic testing via scripted models, and universal developer accessibility under the MIT license.</p>
+  </div>
+</body>
+</html>

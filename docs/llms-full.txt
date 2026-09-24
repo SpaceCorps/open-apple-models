@@ -1,0 +1,316 @@
+# OpenAppleModels: Complete Autonomous Agent Manual (llms-full.txt)
+
+> Comprehensive technical manual and interface specification for autonomous AI agents, developer tooling, and game engines integrating with Apple's on-device Foundation Models.
+
+---
+
+## 1. Executive Summary & Core Capabilities
+
+OpenAppleModels is a production-grade developer runtime written in Swift 6.2 that enables real, deterministic tool calling, multi-turn agent loops, game NPC dialogue, and an OpenAI-compatible HTTP server on Apple's on-device Foundation Models across iOS, iPadOS, macOS, and visionOS 27.
+
+### Why OpenAppleModels Exists
+Apple's native developer tools for Foundation Models exhibit severe bugs when executing tool calling:
+- **`fm serve` 0/54 Failure**: In exhaustive testing on macOS 27, `fm serve` never emits `tool_calls` in responses (0 of 54 test invocations), instead always generating direct natural language text.
+- **`tool_choice: "required"` Crashes**: Setting `tool_choice: "required"` in requests to `fm serve` causes an unhandled HTTP 500 Internal Server Error.
+- **Infinite Tool Loops**: In the native Swift `FoundationModels` framework, configuring `toolCallingMode: .required` traps the model in an infinite tool-calling loop, calling tools turn after turn without returning text to the caller.
+- **Unnecessary Tool Execution**: The native model frequently invokes tools even when standard conversational responses would suffice.
+
+### OpenAppleModels Solutions
+1. **Per-Step Loop Control**: Enforces tool calling on step 1 (`choice: .required`), inspects tool outputs, then transitions mode to `.allowed` or generates direct text on step 2.
+2. **Explicit Fallback Mode (`.explicit`)**: Injects an invisible `respond_directly` tool that allows the model to bypass external tool calls when no lookups are needed, preventing wasteful latency and database queries.
+3. **OpenAI Local Server (`OpenAppleModelsServer`)**: An embeddable HTTP server on `localhost:8080/v1/chat/completions` supporting streaming SSE and guaranteed `tool_calls` emission.
+4. **Episodic NPC Dialogue Engine (`OpenAppleModelsGame`)**: NPC personas with relationship meters (-100 to +100), private secret thresholds, fact extraction, and automatic guardrail retries.
+5. **Universal Game Engine Bridge (`OpenAppleModelsBridge` & `OpenAppleModelsFFI`)**: Bidirectional JSON-RPC 2.0 protocol over stdio and C ABI for Unity, Unreal Engine 5, Godot 4, and Python.
+6. **Constrained Decision Engine (`DecisionEngine`)**: Forces model output into strict enum values with 100% validity (10/10 verified, ~1.2s on NPU).
+7. **Offline CI/CD Mock (`ScriptedLanguageModel`)**: Fully simulates model responses for deterministic unit testing on GitHub Actions with zero hardware requirements.
+
+---
+
+## 2. Architecture & Package Structure
+
+OpenAppleModels is organized into six decoupled SPM packages:
+
+```
+Sources/
+  ├── OpenAppleModels/        # Core Agent, ToolPolicy, AgentTool, SteeredLanguageModel
+  ├── OpenAppleModelsGame/    # NPC, Persona, DialogueTurn, Memory, Guardrails, DecisionEngine
+  ├── OpenAppleModelsServer/  # OpenAI-compatible HTTP daemon, SSE streaming, route handler
+  ├── OpenAppleModelsBridge/  # JSON-RPC 2.0 stdio server, session dispatcher, method handlers
+  ├── OpenAppleModelsFFI/     # C ABI export functions (oam_bridge_create, oam_bridge_call)
+  └── oam/                    # CLI executable (respond, serve, demo, bridge, bench)
+```
+
+---
+
+## 3. System Requirements & Setup
+
+- **Operating System**: macOS 27+, iOS 27+, iPadOS 27+, visionOS 27+.
+- **Hardware**: Apple Silicon (M1/M2/M3/M4 or A17 Pro+) with Apple Neural Engine (ANE).
+- **Apple Intelligence**: Must be enabled in `System Settings > Apple Intelligence & Siri`.
+- **Development Toolchain**: Xcode 16+ or Swift 6.0+ toolchain.
+- **Network Access**: None required. 100% offline and on-device. Zero telemetry.
+
+---
+
+## 4. Swift Core Agent API (`OpenAppleModels`)
+
+### 4.1 Creating Tools (`AgentTool`)
+
+Tools accept dynamic JSON Schema parameters and asynchronous closures:
+
+```swift
+import OpenAppleModels
+
+let weatherTool = try AgentTool(
+    name: "get_weather",
+    description: "Get the current weather for a city.",
+    parameters: .object([
+        "city": .string(description: "City name, e.g. Cupertino")
+    ])
+) { call in
+    let city = try call.string("city")
+    return .json(["city": .string(city), "temp_f": .number(72), "condition": .string("Sunny")])
+}
+```
+
+### 4.2 Configuring the Agent
+
+```swift
+let agent = try Agent(
+    instructions: "You are a weather concierge. Always check the weather tool before answering.",
+    tools: [weatherTool]
+)
+```
+
+### 4.3 Tool Policies (`ToolPolicy`)
+
+- `ToolPolicy(choice: .auto)`: Model decides whether to call tools or reply directly.
+- `ToolPolicy(choice: .required)`: Forces a tool call on step 1, then automatically switches to natural language generation on step 2.
+- `ToolPolicy(choice: .explicit)`: Injects invisible `respond_directly` tool; model only executes real tools if external information is strictly needed.
+- `ToolPolicy(choice: .none)`: Disallows all tool calling; model responds with pure text.
+
+### 4.4 Running Invocations
+
+```swift
+// Synchronous multi-turn turn
+let response = try await agent.respond(
+    to: "What's the weather in Cupertino?",
+    policy: ToolPolicy(choice: .required)
+)
+print(response.text)
+print("Steps executed: \(response.steps.count)")
+```
+
+### 4.5 Streaming Agent Run
+
+```swift
+let run = agent.run("What's the weather in Cupertino?", policy: ToolPolicy(choice: .explicit))
+
+for try await event in run {
+    switch event {
+    case .toolCallRequested(let call):
+        print("Calling tool: \(call.name) with args \(call.arguments)")
+    case .toolCallCompleted(let record):
+        print("Tool returned: \(record.output)")
+    case .tokenEmitted(let text):
+        print(text, terminator: "")
+    case .completed(let response):
+        print("\nFinished in \(response.duration)s")
+    }
+}
+```
+
+---
+
+## 5. Game NPC Dialogue Engine (`OpenAppleModelsGame`)
+
+Designed for interactive storytelling, RPGs, and dynamic virtual characters.
+
+### 5.1 Persona Definition
+
+```swift
+import OpenAppleModelsGame
+
+let blacksmith = Persona(
+    name: "Gorm",
+    archetype: "Blacksmith",
+    tone: "grumpy, short-tempered, but honest",
+    background: "Worked the forge in Irondeep for 40 years. Hates goblins.",
+    secrets: [
+        Secret(topic: "stolen_hammer", revealThreshold: 80,
+               description: "Knows the thieves guild took the runic warhammer.")
+    ]
+)
+```
+
+### 5.2 NPC Initialization & Options
+
+```swift
+let npc = try NPC(
+    persona: blacksmith,
+    tools: [repairTool, inventoryTool],
+    world: worldState,
+    options: NPCOptions(
+        relationship: 15,          // -100 (Hostile) to +100 (Devoted)
+        toolChoice: .explicit,     // Avoids redundant forge lookups
+        memoryTools: .rememberFact,// Enables automatic episodic memory extraction
+        playerOptionCount: 3       // Returns 3 suggested player dialogue choices
+    )
+)
+```
+
+### 5.3 Conducting Dialogue Turns
+
+```swift
+let turn = try await npc.talk("Can you fix my shield?", context: "The player enters the forge.")
+
+print("\(turn.speaker): \(turn.line)")
+print("Mood: \(turn.mood)")
+print("Relationship Delta: \(turn.relationshipDelta)")
+if let options = turn.playerOptions {
+    for (i, opt) in options.enumerated() {
+        print("  [\(i+1)] \(opt)")
+    }
+}
+```
+
+---
+
+## 6. Constrained Decision Engine (`DecisionEngine`)
+
+Forces the local foundation model to choose strictly between predefined enum options without hallucinations.
+
+```swift
+let decision = try await DecisionEngine.decide(
+    model: model,
+    question: "The player attempted to pickpocket the guard. Did they succeed?",
+    options: ["caught", "escaped_unseen", "guard_distracted"],
+    context: "Player stealth: 12. Guard perception: 18."
+)
+// Guaranteed to return one of the three options!
+```
+
+---
+
+## 7. Command-Line Interface (`oam`)
+
+### 7.1 Global Commands
+
+| Command | Arguments / Flags | Description |
+|---|---|---|
+| `oam respond` | `<prompt> [--tool-json <json>] [--tool-choice <mode>]` | Single-shot grounded response |
+| `oam serve` | `[--port <8080>] [--host <127.0.0.1>]` | Start OpenAI-compatible HTTP daemon |
+| `oam demo tavern` | None | Interactive live RPG tavern dialogue demo |
+| `oam bridge` | `[--stdio]` | Start JSON-RPC 2.0 bridge over stdio |
+| `oam bench` | `[--iterations <N>]` | Benchmark NPU token latency and tool accuracy |
+
+### 7.2 CLI Invocations Examples
+
+```bash
+# Force tool call on step 1:
+oam respond "What is my gold balance?" \
+  --tool-json '{"name":"get_gold","description":"Get player gold","parameters":{"type":"object","properties":{}}}' \
+  --tool-choice required
+
+# Run local daemon on port 9000:
+oam serve --port 9000 --host 0.0.0.0
+
+# Start JSON-RPC daemon:
+oam bridge --stdio
+```
+
+---
+
+## 8. OpenAI-Compatible Server (`OpenAppleModelsServer`)
+
+Drop-in replacement for OpenAI endpoints running locally on `http://127.0.0.1:8080/v1`.
+
+### 8.1 Endpoints
+
+- `GET /v1/models`: Lists available local Foundation Models (`apple-foundation-2024`).
+- `POST /v1/chat/completions`: Full Chat Completions endpoint.
+- `GET /health`: Health probe returning `{"status": "ok", "version": "1.0.0"}`.
+
+### 8.2 Request Payload Example
+
+```json
+{
+  "model": "apple-foundation-2024",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Check inventory for magic herbs."}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "check_inventory",
+        "description": "Checks the player inventory",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "item_type": {"type": "string"}
+          },
+          "required": ["item_type"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "required",
+  "stream": true
+}
+```
+
+### 8.3 SSE Stream Output
+
+```
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"check_inventory","arguments":"{\"item_type\": \"magic herbs\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+```
+
+---
+
+## 9. JSON-RPC 2.0 Wire Protocol (`OpenAppleModelsBridge`)
+
+Used by Unity (C#), Godot (GDScript), Unreal Engine (C++), and external processes to communicate with OpenAppleModels over stdio.
+
+### 9.1 Wire Methods
+
+| Method | Params | Description |
+|---|---|---|
+| `initialize` | `{"protocol_version": "1.0.0"}` | Handshake and capability negotiation |
+| `npc.create` | `{"persona": {...}, "tools": [...]}` | Instantiate stateful NPC actor |
+| `npc.talk` | `{"session_id": "...", "text": "..."}` | Send dialogue to NPC |
+| `tool.reply` | `{"call_id": "...", "result": {...}}` | Host returns client-side tool output |
+| `decision.decide`| `{"question": "...", "options": [...]}` | Execute constrained enum decision |
+| `session.destroy`| `{"session_id": "..."}` | Tear down session and free resources |
+
+### 9.2 Request Example: `npc.talk`
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"npc.talk","params":{"session_id":"npc-101","text":"Where did you find this gem?"}}
+```
+
+### 9.3 Client Tool Request Notification (from Bridge to Host)
+
+```json
+{"jsonrpc":"2.0","method":"tool.request","params":{"session_id":"npc-101","call_id":"c-12","name":"inspect_item","arguments":{"item":"gem"}}}
+```
+
+### 9.4 Tool Reply (from Host to Bridge)
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tool.reply","params":{"call_id":"c-12","output":{"purity":"flawless","value_gold":500}}}
+```
+
+---
+
+## 10. Privacy, Telemetry & License
+
+- **Telemetry**: Zero. No tracking pings, no analytics, no phone-home servers.
+- **Data Retention**: All transcripts, embeddings, and weights stay strictly in device memory.
+- **License**: MIT License (100% Free and Open Source).
+- **Maintenance**: Maintained by SpaceCorps ([https://github.com/SpaceCorps](https://github.com/SpaceCorps)).

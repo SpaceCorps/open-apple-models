@@ -40,9 +40,11 @@ public struct NPCOptions: Sendable, Hashable, Codable {
     // MARK: Grounding and tools
 
     /// Tool policy for the first model step of each turn when
-    /// ``groundingTool`` is not set. `.auto` is fastest, but the small model
-    /// often skips tools and invents facts; `.required` makes it call a tool
-    /// first on every turn.
+    /// ``groundingTool`` is not set. The default, `.explicit`, makes the model
+    /// either call a tool or state that it needs none: measured on device it
+    /// picked the right action 8/8 times (vs 7/8 for `.auto`, which skipped the
+    /// menu lookup for "What can I buy?") for about 0.3 s more per turn.
+    /// `.auto` is fastest; `.required` always calls a tool first.
     public var toolChoice: ToolChoice
     /// A tool the NPC must call first on every turn (e.g. `check_inventory`
     /// for a shopkeeper, `read_world_state` for a quest giver). Overrides
@@ -121,7 +123,7 @@ public struct NPCOptions: Sendable, Hashable, Codable {
     public var barkMaximumTokens: Int
 
     public init(
-        toolChoice: ToolChoice = .auto,
+        toolChoice: ToolChoice = .explicit,
         groundingTool: String? = nil,
         maxToolRounds: Int = 2,
         maxToolCalls: Int = 6,

@@ -31,7 +31,7 @@ import Testing
 
         // Grounding forced the tool on the first step only.
         #expect(script.requests.map(\.toolCallingMode) == [.required, .allowed])
-        #expect(script.requests[0].enabledTools == ["check_inventory"])
+        #expect(script.requests[0].userTools == ["check_inventory"])
         #expect(script.requests[1].toolOutputs.count == 1)
         // The reply schema was requested, and the persona is in the instructions.
         let schema = try script.requests[1].responseSchema()
@@ -43,7 +43,8 @@ import Testing
 
     @Test func autoChoiceAndPerTurnOverride() async throws {
         let script = ModelScript([Fixtures.reply("Hmph."), Fixtures.reply("Nothing to say.")])
-        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script), tools: [Fixtures.inventory()])
+        let npc = try NPC(persona: Fixtures.gorm, model: ScriptedLanguageModel(script), tools: [Fixtures.inventory()],
+                          options: NPCOptions(toolChoice: .auto))
         _ = try await npc.talk("Hello")
         _ = try await npc.talk("Bye", toolChoice: ToolChoice.none)
         #expect(script.requests.map(\.toolCallingMode) == [.allowed, .disallowed])
@@ -74,7 +75,7 @@ import Testing
             options: NPCOptions(worldWritable: ["npcs.gorm"], worldContextPaths: ["player.name", "time"]))
         let first = try await npc.talk("How much gold do I have?", context: "The forge is hot.")
         #expect(first.line == "You have 12 gold, Aria.")
-        #expect(script.requests[0].enabledTools == ["read_world_state", "update_world_state"])
+        #expect(script.requests[0].userTools == ["read_world_state", "update_world_state"])
         #expect(script.requests[0].lastPrompt == """
             Game state:
             player.name: Aria
@@ -495,8 +496,8 @@ import Testing
         try npc.setTools([])
         try npc.setOptions(NPCOptions(memoryTools: .rememberFact, playerOptionCount: 0))
         _ = try await npc.talk("2")
-        #expect(script.requests[0].enabledTools == ["check_inventory"])
-        #expect(script.requests[1].enabledTools == ["remember_fact"])
+        #expect(script.requests[0].userTools == ["check_inventory"])
+        #expect(script.requests[1].userTools == ["remember_fact"])
         let schema = try script.requests[1].responseSchema()
         #expect(schema["properties"]?["player_options"] == nil)
     }

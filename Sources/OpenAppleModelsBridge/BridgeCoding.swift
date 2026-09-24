@@ -176,20 +176,21 @@ public enum BridgeCoding {
         return (tools, warnings)
     }
 
-    /// `"auto" | "none" | "required" | {"tool": name}` (a bare tool name is
+    /// `"auto" | "none" | "required" | "explicit" | {"tool": name}` (a bare tool name is
     /// not accepted, so typos are caught).
     public static func toolChoice(_ value: JSONValue, path: String = "toolChoice") throws(BridgeError) -> ToolChoice {
         switch value {
         case .string("auto"): return .auto
         case .string("none"): return .none
         case .string("required"): return .required
+        case .string("explicit"): return .explicit
         case .object(let object):
             if let name = object["tool"]?.stringValue, !name.isEmpty { return .tool(name) }
             // OpenAI form: {"type": "function", "function": {"name": ...}}
             if let name = object["function"]?["name"]?.stringValue, !name.isEmpty { return .tool(name) }
             throw .invalidParams("'\(path)' object must be {\"tool\": \"<name>\"}.")
         default:
-            throw .invalidParams("'\(path)' must be \"auto\", \"none\", \"required\" or {\"tool\": \"<name>\"}; got \(value).")
+            throw .invalidParams("'\(path)' must be \"auto\", \"none\", \"required\", \"explicit\" or {\"tool\": \"<name>\"}; got \(value).")
         }
     }
 

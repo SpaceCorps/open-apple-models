@@ -1,0 +1,427 @@
+/* SpaceCorps Design Tokens & UI Component Stylesheet
+ * Sourced directly from @spacecorps/components (SpaceCorps/storybook)
+ * WCAG AA Contrast Audited & Standardized Across All SpaceCorps Web Properties
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800;900&family=Geist+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+:root {
+  --background: #ffffff;
+  --foreground: #09090b;
+  --card: #ffffff;
+  --card-foreground: #09090b;
+  --popover: #ffffff;
+  --popover-foreground: #09090b;
+  --primary: #6366f1;
+  --primary-hover: #4f46e5;
+  --primary-foreground: #ffffff;
+  --primary-glow: rgba(99, 102, 241, 0.3);
+  --secondary: #f4f4f5;
+  --secondary-foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #64646b;
+  --accent: #38bdf8;
+  --accent-foreground: #ffffff;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --success: #10b981;
+  --success-foreground: #ffffff;
+  --warning: #f59e0b;
+  --warning-foreground: #000000;
+  --info: #3b82f6;
+  --info-foreground: #ffffff;
+  --cyan: #38bdf8;
+  --purple: #7e22ce;
+  --pink: #be185d;
+  --violet: #6d28d9;
+
+  /* Named palette colors */
+  --ivy-green: #00cc92;
+  --ivy-green-foreground: #000000;
+  --slate: #334155;
+  --slate-foreground: #ffffff;
+  --gray: #374151;
+  --gray-foreground: #ffffff;
+  --zinc: #3f3f46;
+  --zinc-foreground: #ffffff;
+  --neutral: #404040;
+  --neutral-foreground: #ffffff;
+  --stone: #44403c;
+  --stone-foreground: #ffffff;
+  --black: #000000;
+  --black-foreground: #ffffff;
+  --white: #ffffff;
+  --white-foreground: #000000;
+  --red: #b91c1c;
+  --red-foreground: #ffffff;
+  --orange: #c2410c;
+  --orange-foreground: #ffffff;
+  --amber: #b45309;
+  --amber-foreground: #ffffff;
+  --yellow: #a16207;
+  --yellow-foreground: #ffffff;
+  --lime: #4d7c0f;
+  --lime-foreground: #ffffff;
+  --green: #15803d;
+  --green-foreground: #ffffff;
+  --emerald: #047857;
+  --emerald-foreground: #ffffff;
+  --teal: #0f766e;
+  --teal-foreground: #ffffff;
+  --sky: #0369a1;
+  --sky-foreground: #ffffff;
+  --blue: #1d4ed8;
+  --blue-foreground: #ffffff;
+  --indigo: #4338ca;
+  --indigo-foreground: #ffffff;
+  --fuchsia: #a21caf;
+  --fuchsia-foreground: #ffffff;
+  --rose: #be123c;
+  --rose-foreground: #ffffff;
+
+  /* Typography */
+  --font-sans: "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  /* Letter spacing base */
+  --tracking-normal: 0em;
+
+  /* Shadow ramp */
+  --shadow-2xs: 0 1px 2px 0 hsl(0 0% 0% / 0.03);
+  --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.03);
+  --shadow-sm: 0 1px 3px 0 hsl(0 0% 0% / 0.06), 0 1px 2px -1px hsl(0 0% 0% / 0.06);
+  --shadow: 0 2px 4px 0 hsl(0 0% 0% / 0.06), 0 1px 2px -1px hsl(0 0% 0% / 0.06);
+  --shadow-md: 0 4px 6px -1px hsl(0 0% 0% / 0.06), 0 2px 4px -2px hsl(0 0% 0% / 0.06);
+  --shadow-lg: 0 10px 15px -3px hsl(0 0% 0% / 0.06), 0 4px 6px -4px hsl(0 0% 0% / 0.06);
+  --shadow-xl: 0 20px 25px -5px hsl(0 0% 0% / 0.06), 0 8px 10px -6px hsl(0 0% 0% / 0.06);
+  --shadow-2xl: 0 25px 50px -12px hsl(0 0% 0% / 0.15);
+
+  --border: #e4e4e7;
+  --input: #e4e4e7;
+  --ring: #6366f1;
+  --radius: 10px;
+  --radius-boxes: 10px;
+  --radius-fields: 8px;
+  --radius-selectors: 6px;
+  --shadow-boxes: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-fields: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-selectors: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+
+  /* Aliases for convenience & backward compatibility */
+  --bg: var(--background);
+  --text: var(--foreground);
+  --text-muted: var(--muted-foreground);
+  --text-dim: #71717a;
+  --bg-card: var(--card);
+  --bg-card-hover: rgba(0, 0, 0, 0.04);
+  --border-accent: rgba(99, 102, 241, 0.35);
+  --accent-glow: rgba(56, 189, 248, 0.2);
+  --code-bg: #f4f4f5;
+  --radius-sm: var(--radius-selectors);
+}
+
+/* Dark Mode (Default for SpaceCorps Ecosystem & Terminal/Agent UI) */
+:root.dark,
+.dark,
+[data-theme="dark"],
+html:not([data-theme="light"]) {
+  --background: #090d16;
+  --foreground: #f1f5f9;
+  --card: #121624;
+  --card-foreground: #f1f5f9;
+  --popover: #0e1320;
+  --popover-foreground: #f1f5f9;
+  --primary: #6366f1;
+  --primary-hover: #4f46e5;
+  --primary-foreground: #ffffff;
+  --primary-glow: rgba(99, 102, 241, 0.35);
+  --secondary: #1a2236;
+  --secondary-foreground: #f1f5f9;
+  --muted: #1e263d;
+  --muted-foreground: #94a3b8;
+  --accent: #38bdf8;
+  --accent-foreground: #ffffff;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --success: #10b981;
+  --success-foreground: #ffffff;
+  --warning: #f59e0b;
+  --warning-foreground: #000000;
+  --info: #38bdf8;
+  --info-foreground: #ffffff;
+  --cyan: #38bdf8;
+  --purple: #818cf8;
+  --pink: #f472b6;
+  --violet: #a78bfa;
+
+  --border: rgba(255, 255, 255, 0.1);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #6366f1;
+
+  /* Aliases */
+  --bg: #090d16;
+  --text: #f1f5f9;
+  --text-muted: #94a3b8;
+  --text-dim: #64748b;
+  --bg-card: rgba(18, 22, 36, 0.75);
+  --bg-card-hover: rgba(28, 35, 58, 0.85);
+  --border-accent: rgba(99, 102, 241, 0.35);
+  --accent-glow: rgba(56, 189, 248, 0.2);
+  --code-bg: #0b0f19;
+  --radius-sm: var(--radius-selectors);
+}
+
+/* Base Typography Enforcement */
+html, body, button, input, select, textarea {
+  font-family: var(--font-sans);
+}
+
+/* ==========================================================================
+   SpaceCorps UI Component Primitives (TUI & Design System)
+   ========================================================================== */
+
+/* ---------- TUI Badges ---------- */
+.tui-badge {
+  --tui-fg: #f1f5f9;
+  --tui-muted-bg: rgba(99, 102, 241, 0.15);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: var(--radius-selectors, 6px);
+  background: var(--tui-muted-bg);
+  color: #a5b4fc;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 13px;
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tui-badge--count {
+  min-width: 18px;
+  padding: 2px 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tui-badge[data-kind="project"],
+.tui-badge-project {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  border-color: rgba(99, 102, 241, 0.35);
+}
+
+.tui-badge[data-kind="success"],
+.tui-badge-success {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.35);
+}
+
+.tui-badge[data-kind="warning"],
+.tui-badge-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.tui-badge[data-kind="danger"],
+.tui-badge-danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+/* ---------- TUI Keyboard Hints ---------- */
+.tui-kbd {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.tui-kbd--boxed,
+kbd.tui-kbd {
+  height: 20px;
+  min-width: 20px;
+  justify-content: center;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--foreground);
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* ---------- TUI Status Dot & Line ---------- */
+.tui-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+.tui-dot--success {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.tui-dot--warning {
+  background: var(--warning);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
+}
+
+.tui-dot--danger {
+  background: var(--destructive);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+}
+
+.tui-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--muted-foreground);
+}
+
+/* ---------- Tooltips ---------- */
+.tui-tooltip-content {
+  border-radius: var(--radius-selectors, 6px);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--foreground);
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------- Standard SpaceCorps Buttons ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+  border-radius: var(--radius-fields, 8px);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 0.95rem;
+  padding: 11px 22px;
+  transition: all 0.15s ease;
+  cursor: pointer;
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+  box-shadow: 0 4px 20px var(--primary-glow);
+}
+
+.btn-primary:hover {
+  background: var(--primary-hover);
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 24px rgba(99, 102, 241, 0.5);
+}
+
+.btn-secondary {
+  background: rgba(22, 27, 46, 0.8);
+  border: 1px solid var(--border);
+  color: #ffffff;
+  backdrop-filter: blur(8px);
+}
+
+.btn-secondary:hover {
+  background: rgba(30, 38, 66, 0.9);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--foreground);
+}
+
+.btn-outline:hover {
+  background: var(--muted);
+  border-color: var(--muted-foreground);
+}
+
+.btn-sm {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  border-radius: var(--radius-selectors, 6px);
+}
+
+/* ---------- Standard SpaceCorps Cards ---------- */
+.card,
+.feature-card,
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-boxes, 10px);
+  padding: 24px;
+  backdrop-filter: blur(12px);
+  transition: all 0.2s ease;
+}
+
+.card:hover,
+.feature-card:hover {
+  border-color: var(--border-accent);
+  background: var(--bg-card-hover);
+  transform: translateY(-2px);
+}
+
+.card-title {
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--foreground);
+  margin-bottom: 8px;
+}
+
+.card-description {
+  font-size: 0.9rem;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+}
+
+/* ---------- Code & Terminal Blocks ---------- */
+.code-block,
+pre,
+code {
+  font-family: var(--font-mono);
+}
+
+.terminal-box {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-boxes, 10px);
+  overflow: hidden;
+}
+
+.terminal-header {
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+}

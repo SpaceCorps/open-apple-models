@@ -195,6 +195,16 @@ public struct AgentTool: Sendable {
 
     public var isExternal: Bool { if case .external = execution { true } else { false } }
 
+    /// Name of the built-in tool behind ``ToolChoice/explicit``. It is never
+    /// reported in events or responses, and user tools may not use the name.
+    public static let respondDirectlyName = "respond_directly"
+
+    static let respondDirectly: AgentTool = try! AgentTool(
+        name: respondDirectlyName,
+        description: "Use when you can reply right away from the conversation alone, without looking anything up or taking an action.",
+        parameters: .empty
+    ) { _ in "Reply now." }
+
     static func typeName(for toolName: String) -> String {
         let parts = toolName.split { !$0.isLetter && !$0.isNumber }
         return parts.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined() + "Arguments"

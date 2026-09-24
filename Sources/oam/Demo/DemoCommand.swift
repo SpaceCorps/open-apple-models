@@ -46,7 +46,7 @@ struct TavernDemo: AsyncParsableCommand {
                 tools: try tavern.tools(),
                 world: tavern.world,
                 options: NPCOptions(
-                    toolChoice: .auto,
+                    toolChoice: .explicit,
                     maxToolRounds: 2,
                     worldReadable: [],
                     worldContextPaths: ["player.name", "player.gold", "tavern.time_of_day", "tavern.weather"],
@@ -96,7 +96,9 @@ struct TavernDemo: AsyncParsableCommand {
                     turn: turn, elapsed: ContinuousClock.now - turnStart,
                     gold: (goldBefore, tavern.gold), relationship: (relationshipBefore, npc.memory.relationship))
                 suggestions = turn.playerOptions
-                if turn.endsConversation { break }
+                // The small model occasionally flags a normal reply as the end of
+                // the conversation; only close early when the player said goodbye.
+                if turn.endsConversation, Tavern.isFarewell(said) { break }
             } catch {
                 screen.problem(CLIError(normalizing: error))
                 suggestions = []
@@ -179,12 +181,17 @@ final class Tavern: Sendable {
 
     var gold: Int { world.get("player.gold")?.intValue ?? 0 }
 
-    /// `check_menu` (read) and `serve_item` (changes the world).
+    static func isFarewell(_ line: String) -> Bool {
+        let lowered = line.lowercased()
+        return ["bye", "goodnight", "good night", "farewell", "see you", "i'm off", "i must go", "leave"].contains { lowered.contains($0) }
+    }
+
+    /// `check_menu` (read) and `take_order` (changes the world).
     func tools() throws -> [AgentTool] {
         let itemArgument = JSONSchema.object(["item": .string(description: "Menu item, e.g. 'ale' or 'rabbit stew'. Empty for the whole menu.")])
         let check = try AgentTool(
             name: "check_menu",
-            description: "Look up the tavern's menu: what is served, the price in gold and how many are left. Use it before quoting prices.",
+            description: "Look up the tavern's menu: what is served, the price in gold and how many are left. Use it when the player asks what you sell or what something costs; leave item empty to list the whole menu.",
             parameters: itemArgument
         ) { [self] call in
             let query = (call.arguments["item"]?.stringValue ?? "").lowercased()
@@ -196,8 +203,8 @@ final class Tavern: Sendable {
             return .json(.array(matches.map { ["item": .string($0.name), "price_gold": .number(Double($0.price)), "left": .number(Double($0.stock))] }))
         }
         let serve = try AgentTool(
-            name: "serve_item",
-            description: "Serve something the player orders or buys, taking payment from the player's gold.",
+            name: "take_order",
+            description: "The player has just ordered a specific item (\"I'll have the stew\", \"one ale, please\"): serve it and charge them. Not for questions about the menu.",
             parameters: itemArgument
         ) { [self] call in
             let query = (call.arguments["item"]?.stringValue ?? "").lowercased()

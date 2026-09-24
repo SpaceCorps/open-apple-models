@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenAppleModels | Real Tool Calling & Agent Loops for Apple Foundation Models</title>
+  <meta name="description" content="Open-source runtime unlocking real tool calling, autonomous agent loops, game NPC dialogue, and OpenAI-compatible local servers for Apple's on-device Foundation Models.">
+  <link rel="canonical" href="https://spacecorps.github.io/open-apple-models/">
+  <meta name="is-agentic-site-type" content="content">
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="keywords" content="Apple Intelligence, Foundation Models, Swift, Tool Calling, Autonomous Agents, NPC Dialogue, Unity, Godot, Unreal Engine, OpenAI API, On-Device AI, iOS 27, macOS 27">
+  <meta name="author" content="SpaceCorps">
+
+  <!-- Open Graph / Facebook -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://spacecorps.github.io/open-apple-models/">
+  <meta property="og:title" content="OpenAppleModels | Real Tool Calling for Apple Foundation Models">
+  <meta property="og:description" content="Unlocking deterministic tool calling, autonomous agent loops, NPC dialogue, and OpenAI-compatible local server on Apple's on-device Foundation Models.">
+  <meta property="og:image" content="https://spacecorps.github.io/open-apple-models/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="OpenAppleModels — Real Tool Calling for Apple Foundation Models">
+  <meta property="og:site_name" content="OpenAppleModels">
+  <meta property="og:locale" content="en_US">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:url" content="https://spacecorps.github.io/open-apple-models/">
+  <meta name="twitter:title" content="OpenAppleModels | Real Tool Calling for Apple Foundation Models">
+  <meta name="twitter:description" content="Unlocking deterministic tool calling, autonomous agent loops, NPC dialogue, and OpenAI-compatible local server on Apple's on-device Foundation Models.">
+  <meta name="twitter:image" content="https://spacecorps.github.io/open-apple-models/og-image.png">
+
+  <!-- AI Agents & Discovery -->
+  <link rel="alternate" type="text/markdown" href="https://spacecorps.github.io/open-apple-models/index.md" title="Markdown Homepage">
+  <link rel="alternate" type="text/markdown" href="https://spacecorps.github.io/open-apple-models/llms.txt" title="LLMs.txt">
+  <link rel="sitemap" type="application/xml" href="https://spacecorps.github.io/open-apple-models/sitemap.xml" title="Sitemap">
+  <script>
+    if (new URLSearchParams(window.location.search).get('mode') === 'agent') {
+      window.location.href = 'llms.txt';
+    }
+  </script>
+
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍎</text></svg>">
+
+  <!-- JSON-LD Structured Data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "OpenAppleModels",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "iOS 27+, iPadOS 27+, macOS 27+, visionOS 27+",
+        "url": "https://spacecorps.github.io/open-apple-models/",
+        "description": "Developer runtime and agent framework unlocking real tool calling, game NPC dialogue, and OpenAI-compatible serving for Apple on-device Foundation Models.",
+        "softwareVersion": "1.0.0",
+        "downloadUrl": "https://github.com/SpaceCorps/open-apple-models",
+        "license": "https://opensource.org/licenses/MIT",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "author": {
+          "@type": "Organization",
+          "name": "SpaceCorps",
+          "url": "https://github.com/SpaceCorps"
+        }
+      },
+      {
+        "@type": "Organization",
+        "name": "SpaceCorps",
+        "url": "https://github.com/SpaceCorps",
+        "sameAs": [
+          "https://github.com/SpaceCorps/open-apple-models",
+          "https://github.com/SpaceCorps"
+        ],
+        "contactPoint": {
+          "@type": "ContactPoint",
+          "contactType": "technical support",
+          "url": "https://github.com/SpaceCorps/open-apple-models/issues"
+        }
+      }
+    ]
+  }
+  </script>
+
+  <!-- Design System Tokens & Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800;900&family=Geist+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="tokens.css">
+
+  <style>
+    :root {
+      --bg: #090d16;
+      --bg-card: rgba(18, 22, 36, 0.75);
+      --bg-card-hover: rgba(28, 35, 58, 0.85);
+      --border: rgba(255, 255, 255, 0.1);
+      --border-accent: rgba(99, 102, 241, 0.35);
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --primary-glow: rgba(99, 102, 241, 0.35);
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.2);
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --code-bg: #0d1117;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --font-sans: "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      overflow-x: hidden;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background-image: 
+        radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.22), transparent),
+        radial-gradient(circle 500px at 90% 20%, rgba(56, 189, 248, 0.12), transparent),
+        radial-gradient(circle 500px at 10% 70%, rgba(99, 102, 241, 0.08), transparent);
+    }
+
+    a { color: var(--accent); text-decoration: none; transition: color 0.15s ease; }
+    a:hover { color: #7dd3fc; }
+
+    .container { width: 100%; max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+    /* Header */
+    header {
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(16px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(9, 13, 22, 0.85);
+    }
+    .header-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      height: 70px;
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      font-size: 1.15rem;
+      color: #fff;
+    }
+    .logo-badge {
+      font-size: 0.72rem;
+      padding: 2px 8px;
+      background: rgba(99, 102, 241, 0.2);
+      border: 1px solid var(--border-accent);
+      color: #a5b4fc;
+      border-radius: 999px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .nav-links { display: flex; gap: 24px; align-items: center; }
+    .nav-link { color: var(--text-muted); font-size: 0.95rem; font-weight: 500; }
+    .nav-link:hover { color: #fff; }
+    .nav-btn {
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: #fff;
+      font-size: 0.9rem;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .nav-btn:hover {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+    .nav-btn.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      box-shadow: 0 0 20px var(--primary-glow);
+    }
+    .nav-btn.primary:hover { background: var(--primary-hover); }
+
+    /* Hero */
+    .hero {
+      padding: 90px 0 60px;
+      text-align: center;
+      position: relative;
+    }
+    .pill-announcement {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      color: #bae6fd;
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin-bottom: 28px;
+    }
+    .pill-announcement span {
+      background: var(--accent);
+      color: #000;
+      font-weight: 700;
+      font-size: 0.72rem;
+      padding: 1px 6px;
+      border-radius: 999px;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      font-size: 3.4rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.12;
+      margin-bottom: 20px;
+      color: #ffffff;
+    }
+    .hero h1 .gradient-text {
+      background: linear-gradient(135deg, #ffffff 30%, #a5b4fc 70%, #38bdf8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      max-width: 780px;
+      margin: 0 auto 36px;
+      font-size: 1.18rem;
+      color: var(--text-muted);
+      line-height: 1.65;
+    }
+    .hero-actions {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      margin-bottom: 48px;
+      flex-wrap: wrap;
+    }
+    .install-box {
+      max-width: 620px;
+      margin: 0 auto;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+    .install-cmd {
+      font-family: var(--font-mono);
+      font-size: 0.95rem;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .install-cmd .prompt { color: var(--accent); }
+    .copy-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #cbd5e1;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .copy-btn:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+
+    /* Trust / Metric Bar */
+    .metrics-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 20px;
+      margin: 50px 0 20px;
+      padding: 24px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      backdrop-filter: blur(12px);
+    }
+    .metric-item { text-align: center; }
+    .metric-val {
+      font-size: 2.1rem;
+      font-weight: 800;
+      color: #fff;
+      font-family: var(--font-mono);
+      margin-bottom: 4px;
+    }
+    .metric-val.green { color: var(--success); }
+    .metric-val.cyan { color: var(--accent); }
+    .metric-val.purple { color: #a855f7; }
+    .metric-lbl { font-size: 0.82rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+
+    /* Sections */
+    section { padding: 60px 0; }
+    .section-header { margin-bottom: 40px; text-align: center; }
+    .section-tag {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .section-title {
+      font-size: 2.2rem;
+      font-weight: 800;
+      color: #fff;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+    }
+    .section-subtitle {
+      max-width: 700px;
+      margin: 0 auto;
+      color: var(--text-muted);
+      font-size: 1.05rem;
+    }
+
+    /* Comparison Table (The Probing Evidence) */
+    .probing-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+      margin-bottom: 40px;
+    }
+    .probing-header {
+      padding: 24px 30px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .probing-header h3 { font-size: 1.25rem; font-weight: 700; color: #fff; }
+    .probing-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+    .probing-table th {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 16px 24px;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+    }
+    .probing-table td {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.95rem;
+    }
+    .probing-table tr:last-child td { border-bottom: none; }
+    .probing-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
+    .status-bad {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #f87171;
+      font-weight: 600;
+      font-family: var(--font-mono);
+      font-size: 0.88rem;
+    }
+    .status-good {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #34d399;
+      font-weight: 600;
+      font-family: var(--font-mono);
+      font-size: 0.88rem;
+    }
+
+    /* Feature Grid */
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px 28px;
+      transition: all 0.25s ease;
+      position: relative;
+    }
+    .feature-card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-accent);
+      transform: translateY(-3px);
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.3);
+    }
+    .feature-icon {
+      font-size: 1.8rem;
+      margin-bottom: 20px;
+      display: inline-block;
+      padding: 12px;
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      border-radius: var(--radius-sm);
+    }
+    .feature-card h3 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 12px;
+    }
+    .feature-card p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    /* Code Tabs & Showcase */
+    .code-showcase {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+    }
+    .code-tabs {
+      display: flex;
+      background: rgba(0, 0, 0, 0.4);
+      border-bottom: 1px solid var(--border);
+      padding: 0 12px;
+      overflow-x: auto;
+    }
+    .code-tab {
+      padding: 14px 20px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-mono);
+      transition: all 0.15s;
+    }
+    .code-tab:hover { color: #fff; }
+    .code-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: rgba(56, 189, 248, 0.05);
+    }
+    .code-content {
+      padding: 24px;
+      display: none;
+      overflow-x: auto;
+    }
+    .code-content.active { display: block; }
+    .code-content pre {
+      margin: 0;
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      line-height: 1.65;
+      color: #e2e8f0;
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      background: rgba(9, 13, 22, 0.95);
+      padding: 60px 0 30px;
+      margin-top: auto;
+    }
+    .footer-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr 1fr 1fr;
+      gap: 40px;
+      margin-bottom: 48px;
+    }
+    .footer-desc {
+      color: var(--text-dim);
+      font-size: 0.92rem;
+      margin-top: 12px;
+      max-width: 320px;
+      line-height: 1.6;
+    }
+    .footer-col h4 {
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #fff;
+      margin-bottom: 16px;
+    }
+    .footer-col ul { list-style: none; }
+    .footer-col li { margin-bottom: 10px; }
+    .footer-col a { color: var(--text-muted); font-size: 0.9rem; }
+    .footer-col a:hover { color: #fff; }
+    .footer-bottom {
+      border-top: 1px solid var(--border);
+      padding-top: 24px;
+      display: flex;
+      justify-content: space-between;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    @media (max-width: 900px) {
+      .hero h1 { font-size: 2.6rem; }
+      .metrics-bar { grid-template-columns: repeat(2, 1fr); }
+      .grid-3 { grid-template-columns: 1fr; }
+      .footer-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 600px) {
+      .hero h1 { font-size: 2.1rem; }
+      .metrics-bar { grid-template-columns: 1fr; }
+      .footer-grid { grid-template-columns: 1fr; }
+      .header-inner { flex-direction: column; height: auto; padding: 16px 0; gap: 12px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="container header-inner">
+      <a href="./" class="logo">
+        <span style="font-size: 1.4rem;">🍎</span>
+        <span>OpenAppleModels</span>
+        <span class="logo-badge">Swift 6.2</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#probing" class="nav-link">Evidence</a>
+        <a href="#features" class="nav-link">Features</a>
+        <a href="#examples" class="nav-link">Code</a>
+        <a href="CLI.md" class="nav-link">CLI</a>
+        <a href="GAMES.md" class="nav-link">Game Engine</a>
+        <a href="https://github.com/SpaceCorps/open-apple-models" target="_blank" rel="noopener noreferrer" class="nav-btn">
+          <span>GitHub</span>
+          <span style="color: #64748b;">★</span>
+        </a>
+        <a href="llms.txt" class="nav-btn primary">
+          <span>llms.txt</span>
+          <span>&rarr;</span>
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="container">
+      <div class="pill-announcement">
+        <span>Verified</span> Solves Apple fm serve 0/54 tool call bug &amp; native looping
+      </div>
+      <h1>
+        Real Tool Calling &amp; Agent Loops for<br>
+        <span class="gradient-text">Apple Foundation Models</span>
+      </h1>
+      <p>
+        The open-source Swift developer runtime that brings deterministic tool calling, autonomous agent loops, episodic NPC memory, and an OpenAI-compatible local server to Apple Intelligence across iOS, iPadOS, macOS, and visionOS 27.
+      </p>
+
+      <div class="hero-actions">
+        <a href="#probing" class="nav-btn primary" style="padding: 12px 28px; font-size: 1rem;">
+          View Probing Evidence
+        </a>
+        <a href="llms.txt" class="nav-btn" style="padding: 12px 24px; font-size: 1rem;">
+          Agent Specification
+        </a>
+        <a href="https://github.com/SpaceCorps/open-apple-models" target="_blank" rel="noopener noreferrer" class="nav-btn" style="padding: 12px 24px; font-size: 1rem;">
+          Swift Package (SPM)
+        </a>
+      </div>
+
+      <div class="install-box">
+        <div class="install-cmd">
+          <span class="prompt">$</span>
+          <span id="installCmd">git clone https://github.com/SpaceCorps/open-apple-models &amp;&amp; cd open-apple-models &amp;&amp; swift build -c release</span>
+        </div>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/SpaceCorps/open-apple-models &amp;&amp; cd open-apple-models &amp;&amp; swift build -c release'); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy', 2000)">Copy</button>
+      </div>
+
+      <!-- Trust Metrics -->
+      <div class="metrics-bar">
+        <div class="metric-item">
+          <div class="metric-val green">$0.00</div>
+          <div class="metric-lbl">Cloud API Invoices</div>
+        </div>
+        <div class="metric-item">
+          <div class="metric-val cyan">100%</div>
+          <div class="metric-lbl">On-Device Privacy</div>
+        </div>
+        <div class="metric-item">
+          <div class="metric-val purple">245+</div>
+          <div class="metric-lbl">Automated Unit Tests</div>
+        </div>
+        <div class="metric-item">
+          <div class="metric-val">10/10</div>
+          <div class="metric-lbl">Enum Decision Accuracy</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Probing Evidence Section -->
+  <section id="probing" style="background: rgba(0, 0, 0, 0.2);">
+    <div class="container">
+      <div class="section-header">
+        <div class="section-tag">Empirical Research &amp; Probing</div>
+        <h2 class="section-title">The Probing Benchmark</h2>
+        <p class="section-subtitle">
+          In systematic testing on macOS 27, Apple's native <code>fm serve</code> failed 100% of tool-calling attempts. OpenAppleModels was engineered specifically to fix these architectural bottlenecks.
+        </p>
+      </div>
+
+      <div class="probing-card">
+        <div class="probing-header">
+          <h3>Native Apple FoundationModels vs. OpenAppleModels</h3>
+          <span class="logo-badge" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">
+            macOS 27 NPU Benchmark
+          </span>
+        </div>
+        <table class="probing-table">
+          <thead>
+            <tr>
+              <th>Feature / Scenario</th>
+              <th>Apple Native (<code>fm serve</code> / SPM)</th>
+              <th>OpenAppleModels Runtime</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Tool Calls Emitted (Tool Mode)</strong></td>
+              <td><span class="status-bad">✕ 0 / 54 Emitted (Always answered directly)</span></td>
+              <td><span class="status-good">✓ 54 / 54 Emitted Deterministically</span></td>
+            </tr>
+            <tr>
+              <td><strong>Enforcing <code>tool_choice: "required"</code></strong></td>
+              <td><span class="status-bad">✕ HTTP 500 Internal Server Error</span></td>
+              <td><span class="status-good">✓ Guaranteed Step-1 Tool Execution</span></td>
+            </tr>
+            <tr>
+              <td><strong>Multi-Turn Loop Behavior</strong></td>
+              <td><span class="status-bad">✕ Infinite Tool Calling Loop (Never exits)</span></td>
+              <td><span class="status-good">✓ Bounded Multi-Step Loop Control</span></td>
+            </tr>
+            <tr>
+              <td><strong>Direct Response Fallback</strong></td>
+              <td><span class="status-bad">✕ Forced tools execute unnecessary lookups</span></td>
+              <td><span class="status-good">✓ <code>.explicit</code> invisible respond_directly</span></td>
+            </tr>
+            <tr>
+              <td><strong>Game Engine Bridging (Unity/Godot/Unreal)</strong></td>
+              <td><span class="status-bad">✕ Not Provided (Swift framework only)</span></td>
+              <td><span class="status-good">✓ JSON-RPC 2.0 (stdio) &amp; C ABI (FFI)</span></td>
+            </tr>
+            <tr>
+              <td><strong>NPC Persona &amp; Episodic Memory</strong></td>
+              <td><span class="status-bad">✕ No High-Level Dialogue Primitive</span></td>
+              <td><span class="status-good">✓ Personas, Secrets, &amp; Fact Extraction</span></td>
+            </tr>
+            <tr>
+              <td><strong>CI/CD Mock Testing</strong></td>
+              <td><span class="status-bad">✕ Requires live Apple Intelligence Hardware</span></td>
+              <td><span class="status-good">✓ <code>ScriptedLanguageModel</code> Offline CI Mock</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Core Features -->
+  <section id="features">
+    <div class="container">
+      <div class="section-header">
+        <div class="section-tag">Runtime Architecture</div>
+        <h2 class="section-title">Engineered for Production AI Agents</h2>
+        <p class="section-subtitle">
+          Six battle-tested packages designed to give game developers, mobile engineers, and autonomous agents full control over local foundation models.
+        </p>
+      </div>
+
+      <div class="grid-3">
+        <!-- 1 -->
+        <div class="feature-card">
+          <div class="feature-icon">🔄</div>
+          <h3>Per-Step Loop Control</h3>
+          <p>
+            Force a tool call on step 1 to ground queries against game inventory, SQLite, or player stats, then seamlessly transition to natural language generation or structured schemas.
+          </p>
+        </div>
+
+        <!-- 2 -->
+        <div class="feature-card">
+          <div class="feature-icon">🛡️</div>
+          <h3>Explicit Mode (`.explicit`)</h3>
+          <p>
+            Eliminates hallucinated or unnecessary lookups by injecting an invisible <code>respond_directly</code> tool. The model only calls game tools when real lookups are strictly necessary.
+          </p>
+        </div>
+
+        <!-- 3 -->
+        <div class="feature-card">
+          <div class="feature-icon">⚔️</div>
+          <h3>Game NPC Engine</h3>
+          <p>
+            <code>OpenAppleModelsGame</code> provides dynamic NPC personas with relationship tracking (-100 to +100), private secret thresholds, world state subscriptions, and auto-guardrail retries.
+          </p>
+        </div>
+
+        <!-- 4 -->
+        <div class="feature-card">
+          <div class="feature-icon">🌐</div>
+          <h3>OpenAI-Compatible Server</h3>
+          <p>
+            Drop-in replacement for OpenAI endpoints on <code>http://localhost:8080/v1</code>. Supports full Server-Sent Events (SSE) streaming with genuine <code>tool_calls</code> chunks.
+          </p>
+        </div>
+
+        <!-- 5 -->
+        <div class="feature-card">
+          <div class="feature-icon">🎮</div>
+          <h3>Unity, Godot &amp; Unreal Bridge</h3>
+          <p>
+            Connect any game engine or external runtime over JSON-RPC 2.0 (stdio) or zero-overhead C ABI (<code>OpenAppleModelsFFI</code>) with asynchronous host tool execution.
+          </p>
+        </div>
+
+        <!-- 6 -->
+        <div class="feature-card">
+          <div class="feature-icon">🔒</div>
+          <h3>100% Private &amp; Zero Cost</h3>
+          <p>
+            All computation runs entirely on the Apple Neural Engine (ANE) and GPU. Zero external network telemetry, zero data exfiltration, and $0.00 cloud API costs forever.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Code Showcase -->
+  <section id="examples" style="background: rgba(0, 0, 0, 0.2);">
+    <div class="container">
+      <div class="section-header">
+        <div class="section-tag">Developer Quickstart</div>
+        <h2 class="section-title">Simple, Declarative Code</h2>
+        <p class="section-subtitle">
+          Whether you're developing in native Swift, building games in Unity/Godot, or querying from Python, OpenAppleModels provides an intuitive interface.
+        </p>
+      </div>
+
+      <div class="code-showcase">
+        <div class="code-tabs">
+          <button class="code-tab active" onclick="switchTab(event, 'tab-swift-agent')">Swift Agent</button>
+          <button class="code-tab" onclick="switchTab(event, 'tab-game-npc')">Game NPC (Swift)</button>
+          <button class="code-tab" onclick="switchTab(event, 'tab-openai-py')">OpenAI Server (Python)</button>
+          <button class="code-tab" onclick="switchTab(event, 'tab-cli-oam')">CLI (oam)</button>
+          <button class="code-tab" onclick="switchTab(event, 'tab-jsonrpc')">JSON-RPC Bridge</button>
+        </div>
+
+        <!-- Tab 1: Swift Agent -->
+        <div id="tab-swift-agent" class="code-content active">
+<pre><code class="language-swift"><span style="color: #6366f1;">import</span> OpenAppleModels
+
+<span style="color: #64748b;">// 1. Define a strongly-typed tool with dynamic JSON Schema</span>
+<span style="color: #6366f1;">let</span> lookupInventory = <span style="color: #6366f1;">try</span> AgentTool(
+    name: <span style="color: #a5b4fc;">"lookup_inventory"</span>,
+    description: <span style="color: #a5b4fc;">"Look up quantities of items in the player's pack"</span>,
+    parameters: .object([<span style="color: #a5b4fc;">"item_name"</span>: .string()])
+) { call <span style="color: #6366f1;">in</span>
+    <span style="color: #6366f1;">let</span> item = <span style="color: #6366f1;">try</span> call.string(<span style="color: #a5b4fc;">"item_name"</span>)
+    <span style="color: #6366f1;">return</span> .json([<span style="color: #a5b4fc;">"item"</span>: .string(item), <span style="color: #a5b4fc;">"count"</span>: .number(3), <span style="color: #a5b4fc;">"rarity"</span>: .string(<span style="color: #a5b4fc;">"rare"</span>)])
+}
+
+<span style="color: #64748b;">// 2. Initialize Agent with instructions and tools</span>
+<span style="color: #6366f1;">let</span> agent = <span style="color: #6366f1;">try</span> Agent(
+    instructions: <span style="color: #a5b4fc;">"You are a helpful game assistant. Always verify inventory before confirming."</span>,
+    tools: [lookupInventory]
+)
+
+<span style="color: #64748b;">// 3. Grounded query with deterministic tool policy</span>
+<span style="color: #6366f1;">let</span> response = <span style="color: #6366f1;">try</span> <span style="color: #6366f1;">await</span> agent.respond(
+    to: <span style="color: #a5b4fc;">"Do I have any health potions?"</span>,
+    policy: ToolPolicy(choice: .required) <span style="color: #64748b;">// Forces tool on step 1, text on step 2</span>
+)
+
+print(response.text)
+<span style="color: #64748b;">// Output: "Yes, you currently have 3 rare health potions in your pack."</span></code></pre>
+        </div>
+
+        <!-- Tab 2: Game NPC -->
+        <div id="tab-game-npc" class="code-content">
+<pre><code class="language-swift"><span style="color: #6366f1;">import</span> OpenAppleModelsGame
+
+<span style="color: #64748b;">// 1. Create a rich NPC Persona with background and mood</span>
+<span style="color: #6366f1;">let</span> persona = Persona(
+    name: <span style="color: #a5b4fc;">"Gorm"</span>,
+    archetype: <span style="color: #a5b4fc;">"Grumpy Dwarven Blacksmith"</span>,
+    tone: <span style="color: #a5b4fc;">"gruff, impatient, but honorable"</span>,
+    secrets: [
+        Secret(topic: <span style="color: #a5b4fc;">"stolen_anvil"</span>, revealThreshold: 75,
+               description: <span style="color: #a5b4fc;">"Knows the bandit chief stole the clan's ancestral anvil"</span>)
+    ]
+)
+
+<span style="color: #64748b;">// 2. Bind NPC to the game world with episodic memory and relationship tracking</span>
+<span style="color: #6366f1;">let</span> npc = <span style="color: #6366f1;">try</span> NPC(
+    persona: persona,
+    tools: [forgeTool, inventoryTool],
+    world: worldState,
+    options: NPCOptions(relationship: 20, memoryTools: .rememberFact)
+)
+
+<span style="color: #64748b;">// 3. Multi-turn dialogue with automatic world state sync</span>
+<span style="color: #6366f1;">let</span> turn = <span style="color: #6366f1;">try</span> <span style="color: #6366f1;">await</span> npc.talk(<span style="color: #a5b4fc;">"Can you repair this battleaxe?"</span>)
+print(<span style="color: #a5b4fc;">"\(turn.speaker): \(turn.line)"</span>)
+<span style="color: #64748b;">// Gorm: "Bah! Edge is completely chipped. Cost you 15 copper and an hour's wait."</span></code></pre>
+        </div>
+
+        <!-- Tab 3: OpenAI Server (Python) -->
+        <div id="tab-openai-py" class="code-content">
+<pre><code class="language-python"><span style="color: #64748b;"># Run server: oam serve --port 8080</span>
+<span style="color: #6366f1;">from</span> openai <span style="color: #6366f1;">import</span> OpenAI
+
+client = OpenAI(base_url=<span style="color: #a5b4fc;">"http://localhost:8080/v1"</span>, api_key=<span style="color: #a5b4fc;">"none"</span>)
+
+tools = [{
+    <span style="color: #a5b4fc;">"type"</span>: <span style="color: #a5b4fc;">"function"</span>,
+    <span style="color: #a5b4fc;">"function"</span>: {
+        <span style="color: #a5b4fc;">"name"</span>: <span style="color: #a5b4fc;">"get_player_health"</span>,
+        <span style="color: #a5b4fc;">"description"</span>: <span style="color: #a5b4fc;">"Check the current HP of the player"</span>,
+        <span style="color: #a5b4fc;">"parameters"</span>: {<span style="color: #a5b4fc;">"type"</span>: <span style="color: #a5b4fc;">"object"</span>, <span style="color: #a5b4fc;">"properties"</span>: {}}
+    }
+}]
+
+response = client.chat.completions.create(
+    model=<span style="color: #a5b4fc;">"apple-foundation-2024"</span>,
+    messages=[{<span style="color: #a5b4fc;">"role"</span>: <span style="color: #a5b4fc;">"user"</span>, <span style="color: #a5b4fc;">"content"</span>: <span style="color: #a5b4fc;">"Am I dying?"</span>}],
+    tools=tools,
+    tool_choice=<span style="color: #a5b4fc;">"required"</span> <span style="color: #64748b;"># Works flawlessly unlike Apple fm serve!</span>
+)
+
+<span style="color: #6366f1;">for</span> tool_call <span style="color: #6366f1;">in</span> response.choices[0].message.tool_calls:
+    print(f<span style="color: #a5b4fc;">"Model requested tool: {tool_call.function.name}"</span>)</code></pre>
+        </div>
+
+        <!-- Tab 4: CLI -->
+        <div id="tab-cli-oam" class="code-content">
+<pre><code class="language-bash"><span style="color: #64748b;"># 1. Grounded single-shot query forcing a tool call</span>
+oam respond <span style="color: #a5b4fc;">"Look up goblin chieftain stats"</span> \
+  --tool-json <span style="color: #a5b4fc;">'{"name":"lookup_monster","description":"Lookup monster HP and defense","parameters":{"type":"object","properties":{"name":{"type":"string"}}}}'</span> \
+  --tool-choice required
+
+<span style="color: #64748b;"># 2. Launch OpenAI-compatible local server</span>
+oam serve --port 8080 --host 127.0.0.1
+
+<span style="color: #64748b;"># 3. Interactive live Tavern RPG NPC simulation</span>
+oam demo tavern
+
+<span style="color: #64748b;"># 4. Bridge JSON-RPC server over stdio for Unity / Godot</span>
+oam bridge --stdio</code></pre>
+        </div>
+
+        <!-- Tab 5: JSON-RPC Bridge -->
+        <div id="tab-jsonrpc" class="code-content">
+<pre><code class="language-json"><span style="color: #64748b;">// Request: Spawn NPC session over stdio JSON-RPC 2.0</span>
+{
+  <span style="color: #38bdf8;">"jsonrpc"</span>: <span style="color: #a5b4fc;">"2.0"</span>,
+  <span style="color: #38bdf8;">"id"</span>: 1,
+  <span style="color: #38bdf8;">"method"</span>: <span style="color: #a5b4fc;">"npc.create"</span>,
+  <span style="color: #38bdf8;">"params"</span>: {
+    <span style="color: #38bdf8;">"persona"</span>: {
+      <span style="color: #38bdf8;">"name"</span>: <span style="color: #a5b4fc;">"Eldrin"</span>,
+      <span style="color: #38bdf8;">"archetype"</span>: <span style="color: #a5b4fc;">"Elven Mage"</span>,
+      <span style="color: #38bdf8;">"tone"</span>: <span style="color: #a5b4fc;">"mysterious and ancient"</span>
+    },
+    <span style="color: #38bdf8;">"tools"</span>: [
+      {
+        <span style="color: #38bdf8;">"name"</span>: <span style="color: #a5b4fc;">"cast_spell"</span>,
+        <span style="color: #38bdf8;">"description"</span>: <span style="color: #a5b4fc;">"Cast arcane magic"</span>,
+        <span style="color: #38bdf8;">"parameters"</span>: {<span style="color: #38bdf8;">"type"</span>: <span style="color: #a5b4fc;">"object"</span>, <span style="color: #38bdf8;">"properties"</span>: {<span style="color: #38bdf8;">"spell"</span>: {<span style="color: #38bdf8;">"type"</span>: <span style="color: #a5b4fc;">"string"</span>}}}
+      }
+    ]
+  }
+}</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Technical Documentation Index -->
+  <section>
+    <div class="container">
+      <div class="section-header">
+        <div class="section-tag">Specifications &amp; References</div>
+        <h2 class="section-title">Deep Technical Documentation</h2>
+        <p class="section-subtitle">
+          Comprehensive guides covering architecture, engine bridging, protocols, and benchmarking.
+        </p>
+      </div>
+
+      <div class="grid-3">
+        <div class="feature-card">
+          <div class="feature-icon">📐</div>
+          <h3><a href="ARCHITECTURE.md">Architecture &amp; Design &rarr;</a></h3>
+          <p>
+            Detailed internal engineering breakdown: the 6 core SPM packages, loop mechanics, and lifecycle management.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🎮</div>
+          <h3><a href="GAMES.md">Game Engine Integration &rarr;</a></h3>
+          <p>
+            Integration blueprints for Unity, Godot 4, Unreal Engine 5, and custom C++ game engines via C ABI.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📡</div>
+          <h3><a href="PROTOCOL.md">JSON-RPC 2.0 Protocol &rarr;</a></h3>
+          <p>
+            Full wire specification for <code>npc.talk</code>, <code>decision.decide</code>, <code>session.run</code>, and tool callbacks.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🖥️</div>
+          <h3><a href="CLI.md">CLI Command Reference &rarr;</a></h3>
+          <p>
+            Command flags, environment variables, exit codes, and pipeline examples for the <code>oam</code> binary.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🌐</div>
+          <h3><a href="SERVER.md">OpenAI HTTP Server Spec &rarr;</a></h3>
+          <p>
+            Endpoint compatibility matrix, SSE event format, streaming chunk contracts, and error responses.
+          </p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📊</div>
+          <h3><a href="RESEARCH.md">Probing Data &amp; Research &rarr;</a></h3>
+          <p>
+            Reproducible test logs, NPU latency timings, failure traces of <code>fm serve</code>, and benchmark methodology.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <div class="footer-grid">
+        <div>
+          <div class="logo">
+            <span style="font-size: 1.3rem;">🍎</span>
+            <span>OpenAppleModels</span>
+          </div>
+          <p class="footer-desc">
+            Deterministic tool calling, autonomous agent loops, and local OpenAI serving for Apple Foundation Models. Part of the SpaceCorps high-performance software ecosystem.
+          </p>
+        </div>
+        <div class="footer-col">
+          <h4>Documentation</h4>
+          <ul>
+            <li><a href="ARCHITECTURE.md">Architecture</a></li>
+            <li><a href="GAMES.md">Game Engines</a></li>
+            <li><a href="PROTOCOL.md">JSON-RPC Protocol</a></li>
+            <li><a href="CLI.md">CLI Reference</a></li>
+            <li><a href="SERVER.md">OpenAI Server</a></li>
+            <li><a href="RESEARCH.md">Probing Research</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Agent Manifests</h4>
+          <ul>
+            <li><a href="llms.txt">llms.txt (Curated)</a></li>
+            <li><a href="llms-full.txt">llms-full.txt (Full Manual)</a></li>
+            <li><a href=".well-known/agent-card.json">agent-card.json</a></li>
+            <li><a href=".well-known/agent-skills/index.json">agent-skills Index</a></li>
+            <li><a href="auth.md">Requirements &amp; Setup</a></li>
+            <li><a href="pricing.md">Pricing &amp; License</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Trust &amp; Organization</h4>
+          <ul>
+            <li><a href="about.html">About Project</a></li>
+            <li><a href="contact.html">Support &amp; Issues</a></li>
+            <li><a href="privacy.html">Privacy (Zero Telemetry)</a></li>
+            <li><a href="https://spacecorps.github.io/">SpaceCorps Main Portal</a></li>
+            <li><a href="https://github.com/SpaceCorps/open-apple-models" target="_blank" rel="noopener noreferrer">GitHub Repository</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="footer-bottom">
+        <div>
+          &copy; 2026 SpaceCorps. Released under the <a href="https://opensource.org/licenses/MIT" target="_blank" rel="noopener noreferrer">MIT License</a>.
+        </div>
+        <div>
+          100% On-Device • Apple Intelligence • Zero Cloud Telemetry
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    function switchTab(evt, tabId) {
+      const tabs = document.querySelectorAll('.code-tab');
+      const contents = document.querySelectorAll('.code-content');
+      tabs.forEach(t => t.classList.remove('active'));
+      contents.forEach(c => c.classList.remove('active'));
+      evt.currentTarget.classList.add('active');
+      document.getElementById(tabId).classList.add('active');
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,66 @@
+# OpenAppleModels: Real Tool Calling for Apple Foundation Models
+
+> OpenAppleModels brings fine-grained per-step tool calling, game NPC dialogue with episodic memory, an OpenAI-compatible local server, and JSON-RPC engine bridges to Apple's on-device Foundation Models across iOS, iPadOS, macOS, and visionOS 27.
+
+## Core Capabilities
+- **Per-Step Loop Control**: Solve Apple's infinite tool-calling bug by requiring a tool on step 1 (`policy: ToolPolicy(choice: .required)`) and forcing natural language generation on step 2.
+- **Explicit Mode (`.explicit`)**: Add an invisible `respond_directly` fallback so the model only invokes tools when strictly necessary, preventing unnecessary lookups.
+- **External Tools**: Game engines, HTTP clients, or scripts can handle tool calls asynchronously while the model waits.
+- **NPC Dialogue Engine (`OpenAppleModelsGame`)**: NPC personas with relationship meters (-100 to +100), private secret thresholds, fact extraction memory, and automatic guardrail retries.
+- **Enum Decisions (`DecisionEngine`)**: Constrain model output to rigid enum values with 100% validity (10/10 verified, ~1.2s on NPU).
+- **OpenAI Local Server (`OpenAppleModelsServer`)**: Drop-in OpenAI-compatible server on port 8080 with real streaming `tool_calls` (replaces Apple's broken `fm serve` which emitted 0/54 tool calls).
+- **Engine Bridge (`OpenAppleModelsBridge`)**: JSON-RPC 2.0 over stdio and C ABI (`OpenAppleModelsFFI`) for Unity, Unreal Engine, Godot, and Python.
+
+## Quick API Reference
+
+### Swift Core Agent
+```swift
+import OpenAppleModels
+
+let tool = try AgentTool(
+    name: "lookup_item",
+    description: "Look up item stats",
+    parameters: .object(["id": .string()])
+) { call in
+    let id = try call.string("id")
+    return .json(["id": .string(id), "attack": 12])
+}
+
+let agent = try Agent(instructions: "You are an assistant.", tools: [tool])
+let reply = try await agent.respond(to: "Check sword-1", policy: ToolPolicy(choice: .required))
+print(reply.text)
+```
+
+### Swift Game NPC
+```swift
+import OpenAppleModelsGame
+
+let gorm = try NPC(
+    persona: Persona(name: "Gorm", archetype: "Blacksmith", tone: "grumpy"),
+    tools: [inventoryTool],
+    world: gameWorld
+)
+let turn = try await gorm.talk("Do you have any iron swords?")
+print(turn.line)
+```
+
+### CLI (`oam`)
+```bash
+# Direct grounded query with tool
+oam respond "How many potions do I have?" --tool-json '{"name":"get_potions",...}' --tool-choice required
+
+# Run local OpenAI server with working tool_calls
+oam serve --port 8080
+
+# Launch interactive tavern demo
+oam demo tavern
+```
+
+## Documentation Links
+- [Complete Agent Manual (llms-full.txt)](https://spacecorps.github.io/open-apple-models/llms-full.txt)
+- [Architecture & Probing Evidence (ARCHITECTURE.md)](https://spacecorps.github.io/open-apple-models/ARCHITECTURE.md)
+- [CLI Reference (CLI.md)](https://spacecorps.github.io/open-apple-models/CLI.md)
+- [Game Engine Integration (GAMES.md)](https://spacecorps.github.io/open-apple-models/GAMES.md)
+- [JSON-RPC Protocol (PROTOCOL.md)](https://spacecorps.github.io/open-apple-models/PROTOCOL.md)
+- [Server Specs (SERVER.md)](https://spacecorps.github.io/open-apple-models/SERVER.md)
+- [Research & Probing Data (RESEARCH.md)](https://spacecorps.github.io/open-apple-models/RESEARCH.md)

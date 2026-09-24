@@ -145,6 +145,7 @@ final class ToolRuntime: Sendable {
     func invoke(_ tool: AgentTool, arguments: GeneratedContent) async throws -> String {
         active.withLock { $0 += 1 }
         defer { active.withLock { $0 -= 1 } }
+        if tool.name == AgentTool.respondDirectlyName { return "Reply now." }
         guard let turn = current.withLock({ $0 }) else {
             return ToolOutput.error("Tool '\(tool.name)' is not available right now.").modelText
         }
