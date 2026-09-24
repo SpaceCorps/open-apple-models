@@ -276,3 +276,32 @@ final class Counter: Sendable {
         }
     }
 }
+
+@Suite struct ToolChoiceCodingTests {
+    @Test(arguments: [
+        (ToolChoice.auto, #""auto""#), (.none, #""none""#), (.required, #""required""#), (.tool("open_gate"), #"{"tool":"open_gate"}"#),
+    ])
+    func roundTrips(_ choice: ToolChoice, _ json: String) throws {
+        #expect(String(decoding: try JSONEncoder().encode(choice), as: UTF8.self) == json)
+        #expect(try JSONDecoder().decode(ToolChoice.self, from: Data(json.utf8)) == choice)
+    }
+
+    @Test func acceptsOpenAIShape() throws {
+        let json = #"{"type":"function","function":{"name":"roll_dice"}}"#
+        #expect(try JSONDecoder().decode(ToolChoice.self, from: Data(json.utf8)) == .tool("roll_dice"))
+    }
+
+    @Test func immediateSubmitFromTheEventIsNeverLost() async throws {
+        let tool = try AgentTool.external(name: "ping", description: "Ping.")
+        for _ in 0..<50 {
+            let script = ModelScript([.toolCalls([.init(name: "ping")]), .text("pong")])
+            let agent = try Agent(model: ScriptedLanguageModel(script), tools: [tool])
+            let run = agent.run("ping")
+            for try await event in run {
+                if case .toolCallRequested(let call) = event {
+                    #expect(run.submit("ok", for: call.id))
+                }
+            }
+        }
+    }
+}

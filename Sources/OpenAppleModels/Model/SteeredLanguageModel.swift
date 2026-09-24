@@ -3,7 +3,10 @@ import FoundationModels
 import Synchronization
 
 /// How the model may use tools during one turn.
-public enum ToolChoice: Sendable, Hashable, Codable {
+///
+/// Encodes as JSON `"auto"`, `"none"`, `"required"` or `{"tool": "name"}`.
+/// Decoding also accepts OpenAI's `{"type": "function", "function": {"name": …}}`.
+public enum ToolChoice: Sendable, Hashable {
     /// The model decides at every step.
     case auto
     /// Tools are disabled for this turn.
@@ -12,6 +15,44 @@ public enum ToolChoice: Sendable, Hashable, Codable {
     case required
     /// The model must call the named tool first, then answers freely.
     case tool(String)
+}
+
+extension ToolChoice: Codable {
+    private enum Keys: String, CodingKey { case tool, type, function, name }
+
+    public init(from decoder: any Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let text = try? single.decode(String.self) {
+            switch text {
+            case "auto": self = .auto
+            case "none": self = .none
+            case "required", "any": self = .required
+            default:
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                    debugDescription: "Expected \"auto\", \"none\", \"required\" or {\"tool\": name}, got \"\(text)\"."))
+            }
+            return
+        }
+        let container = try decoder.container(keyedBy: Keys.self)
+        if let name = try container.decodeIfPresent(String.self, forKey: .tool) {
+            self = .tool(name)
+        } else if let name = try container.decodeIfPresent(String.self, forKey: .name) {
+            self = .tool(name)
+        } else {
+            let function = try container.nestedContainer(keyedBy: Keys.self, forKey: .function)
+            self = .tool(try function.decode(String.self, forKey: .name))
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        switch self {
+        case .auto: var c = encoder.singleValueContainer(); try c.encode("auto")
+        case .none: var c = encoder.singleValueContainer(); try c.encode("none")
+        case .required: var c = encoder.singleValueContainer(); try c.encode("required")
+        case .tool(let name):
+            var c = encoder.container(keyedBy: Keys.self)
+            try c.encode(name, forKey: .tool)
+        }
+    }
 }
 
 /// Per-turn limits on the tool-calling loop.

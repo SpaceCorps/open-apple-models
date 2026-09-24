@@ -65,8 +65,10 @@ final class TurnContext: Sendable {
     var steps: [ModelStep] { state.withLock { $0.steps } }
     var pendingCalls: [ToolCall] { state.withLock { $0.pending.values.map(\.call).sorted { $0.id < $1.id } } }
 
-    /// Waits for the host to submit output for an external call.
-    func awaitExternalOutput(for call: ToolCall) async -> ToolOutput {
+    /// Registers an external call, then announces it via `announce`, then
+    /// waits for the host to submit its output. Registering first means a host
+    /// that replies immediately from the announcement can never miss the call.
+    func awaitExternalOutput(for call: ToolCall, announce: @Sendable () -> Void) async -> ToolOutput {
         await withTaskCancellationHandler {
             await withCheckedContinuation { (resume: CheckedContinuation<ToolOutput, Never>) in
                 let immediate: ToolOutput? = state.withLock { state in
@@ -74,7 +76,11 @@ final class TurnContext: Sendable {
                     state.pending[call.id] = (call, resume)
                     return nil
                 }
-                if let immediate { resume.resume(returning: immediate) }
+                if let immediate {
+                    resume.resume(returning: immediate)
+                } else {
+                    announce()
+                }
             }
         } onCancel: {
             _ = self.submit(.error("The tool call was cancelled."), for: call.id)
@@ -126,11 +132,11 @@ final class ToolRuntime: Sendable {
             turn.emit(.toolCallStarted(call))
             output = await Self.run(handler, call: call, timeout: tool.timeout ?? turn.defaultToolTimeout)
         case .external:
-            turn.emit(.toolCallRequested(call))
+            let announce: @Sendable () -> Void = { turn.emit(.toolCallRequested(call)) }
             if let timeout = tool.timeout {
-                output = await Self.withTimeout(timeout, call: call) { await turn.awaitExternalOutput(for: call) }
+                output = await Self.withTimeout(timeout, call: call) { await turn.awaitExternalOutput(for: call, announce: announce) }
             } else {
-                output = await turn.awaitExternalOutput(for: call)
+                output = await turn.awaitExternalOutput(for: call, announce: announce)
             }
         }
         try Task.checkCancellation()
