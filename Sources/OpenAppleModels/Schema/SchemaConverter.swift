@@ -149,8 +149,14 @@ public struct SchemaConverter {
         if properties.isEmpty, let additional = schema["additionalProperties"], additional != .bool(false) {
             warn(path, "free-form objects (additionalProperties without properties) cannot be generated; producing an empty object")
         }
+        // Property order follows `x-order` when present (as written by
+        // `fm schema object` and FoundationModels' own encoder), otherwise
+        // document order.
+        var order = schema["x-order"]?.arrayValue?.compactMap(\.stringValue).filter { properties[$0] != nil } ?? []
+        order += properties.keys.filter { !order.contains($0) }
         var converted: [DynamicGenerationSchema.Property] = []
-        for (key, value) in properties {
+        for key in order {
+            let value = properties[key]!
             let childName = uniqueName(value["title"]?.stringValue ?? name + "_" + key)
             let child = try build(value, name: childName, path: path + "/properties/" + key)
             let description = child.description ?? value["description"]?.stringValue

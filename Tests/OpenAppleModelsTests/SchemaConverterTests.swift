@@ -116,3 +116,12 @@ import Testing
         #expect(plain.json["properties"]?["item"]?["type"] == "string")
     }
 }
+
+@Suite struct SchemaXOrderTests {
+    @Test func xOrderWinsOverDocumentOrder() throws {
+        let schema = try JSONSchema(parsing: #"{"type":"object","properties":{"b":{"type":"string"},"a":{"type":"string"},"c":{"type":"string"}},"x-order":["a","c","b"]}"#)
+        let generation = try SchemaConverter.convert(schema, rootName: "T").schema
+        let json = try JSONValue(parsing: try JSONEncoder().encode(generation))
+        #expect(json["x-order"] == ["a", "c", "b"])
+    }
+}
