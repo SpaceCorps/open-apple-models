@@ -1,5 +1,7 @@
 # open-apple-models
 
+[![CI](https://github.com/SpaceCorps/open-apple-models/actions/workflows/ci.yml/badge.svg)](https://github.com/SpaceCorps/open-apple-models/actions/workflows/ci.yml) ![Swift 6](https://img.shields.io/badge/Swift-6-orange) ![Platforms](https://img.shields.io/badge/iOS%20%7C%20iPadOS%20%7C%20macOS%20%7C%20visionOS-27-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
 **Real tool calling for Apple's on-device Foundation Models.** Build games where NPCs talk, check the world, and make decisions on iPhone, iPad and Mac. There are no API keys or server costs, and nothing leaves the device.
 
 macOS 27 ships Apple's `fm` CLI and an OpenAI-style `fm serve`, but neither returns tool calls. `fm serve` injects your tools and then never emits `tool_calls` (0 of 54 in our tests), and `tool_choice: "required"` returns HTTP 500. In Swift, the obvious switch, `toolCallingMode: .required`, makes the model call tools forever. This package makes the on-device model a reliable agent:
