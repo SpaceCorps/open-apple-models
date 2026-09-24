@@ -119,7 +119,11 @@ enum BlockingCall {
         } catch {
             return JSONRPCMessage.error(id: nil, .parseError(error.description))
         }
-        let id = request["id"].flatMap(JSONRPCID.init)
+        let rawID = request["id"].flatMap { $0.isNull ? nil : $0 }
+        let id = rawID.flatMap(JSONRPCID.init)
+        if let rawID, id == nil {
+            return JSONRPCMessage.error(id: nil, .invalidRequest(JSONRPCID.rejectionReason(rawID)))
+        }
         guard let method = request["method"]?.stringValue, !method.isEmpty else {
             return JSONRPCMessage.error(id: id, .invalidRequest("'method' must be a non-empty string."))
         }
@@ -130,7 +134,8 @@ enum BlockingCall {
         let task = Task {
             let result: Result<JSONValue, BridgeError>
             do {
-                result = .success(try await engine.call(method, params))
+                // The caller's id tags the request's notifications and tool/call requests.
+                result = .success(try await engine.call(method, params, id: id))
             } catch {
                 result = .failure(BridgeError(normalizing: error))
             }
@@ -144,7 +149,7 @@ enum BlockingCall {
         }
         switch outcome.withLock({ $0 }) ?? .failure(.internalError("No result.")) {
         case .success(let value):
-            return JSONValue.object(["jsonrpc": "2.0", "id": id?.value ?? .null, "result": value]).serialized()
+            return JSONRPCMessage.serialize(["jsonrpc": "2.0", "id": id?.value ?? .null, "result": value])
         case .failure(let error):
             return JSONRPCMessage.error(id: id, error)
         }

@@ -1,7 +1,6 @@
 import Foundation
 import FoundationModels
 import OpenAppleModels
-import Synchronization
 
 /// An agent owned by a bridge client, addressed by id.
 ///
@@ -18,13 +17,7 @@ public final class BridgeSession: Sendable {
     /// Time limit applied to client tools added later via `session/setTools`.
     public let toolTimeout: Duration?
 
-    private struct State {
-        var tail: Task<Void, Never>?
-        var work: [Int: Task<Void, Never>] = [:]
-        var nextToken = 0
-    }
-
-    private let state = Mutex(State())
+    private let queue = WorkQueue()
 
     public init(id: String, agent: Agent, modelKind: String, toolTimeout: Duration?, createdAt: Date = Date()) {
         self.id = id
@@ -37,55 +30,32 @@ public final class BridgeSession: Sendable {
     /// Queues `work` behind this session's earlier work and returns a reply
     /// that completes with its result. The queue position is taken now, so
     /// call this from the (ordered) handler, not from inside deferred work.
+    ///
+    /// Cancellation (``cancelAll()``, `session/delete`, `shutdown`) cancels
+    /// the work's task. Work that finishes successfully after it was
+    /// cancelled is reported as `cancelled`, so call ``commit()`` right
+    /// before the work changes anything.
     public func schedule(_ work: @escaping @Sendable () async throws -> JSONValue) -> BridgeReply {
-        let outcome = OneShot<Result<JSONValue, BridgeError>>()
-        let token = state.withLock { state -> Int in
-            let token = state.nextToken
-            state.nextToken += 1
-            let previous = state.tail
-            let task = Task { [self] in
-                await previous?.value
-                let result: Result<JSONValue, BridgeError>
-                if Task.isCancelled {
-                    result = .failure(.cancelled("The request was cancelled before it started."))
-                } else {
-                    do {
-                        result = .success(try await work())
-                    } catch {
-                        result = .failure(BridgeError(normalizing: error))
-                    }
-                }
-                _ = self.state.withLock { $0.work.removeValue(forKey: token) }
-                outcome.resolve(result)
-            }
-            state.tail = task
-            state.work[token] = task
-            return token
-        }
-        return .deferred { [self] in
-            let result = await withTaskCancellationHandler {
-                await outcome.value()
-            } onCancel: {
-                self.cancel(token: token)
-            }
-            return try result.get()
-        }
+        queue.schedule(work)
+    }
+
+    /// Inside ``schedule(_:)`` work: marks the point of no return, right
+    /// before the work changes state. Throws `cancelled` if the operation was
+    /// already cancelled (then change nothing); otherwise later cancellation
+    /// no longer applies to it and its result is reported as-is. Outside
+    /// scheduled work it only checks `Task.isCancelled`.
+    public static func commit() throws(BridgeError) {
+        try WorkQueue.commit()
     }
 
     /// Cancels running and queued work. Returns how many operations were cancelled.
     @discardableResult
     public func cancelAll() -> Int {
-        let tasks = state.withLock { Array($0.work.values) }
-        for task in tasks { task.cancel() }
-        return tasks.count
+        queue.cancelAll()
     }
 
     /// Operations running or waiting on this session.
-    public var pendingOperations: Int { state.withLock { $0.work.count } }
-
-    private func cancel(token: Int) {
-        state.withLock { $0.work[token] }?.cancel()
-    }
+    public var pendingOperations: Int { queue.pendingOperations }
 
     /// A summary for `session/list`.
     public var summary: JSONValue {

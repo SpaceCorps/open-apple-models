@@ -72,6 +72,9 @@ final class TurnDriver: Sendable {
                             cancel(request, callID: record.call.id, reason: record.output.modelText)
                         }
                     case .completed(let response):
+                        // The turn is in the transcript now: report it even
+                        // if a cancellation arrives before the response.
+                        WorkQueue.markCommitted()
                         return .success(response)
                     default:
                         break

@@ -17,6 +17,7 @@ enum NPCMethods {
             let entry = try game.npcEntry(request.params.string("npc"))
             let clearMemory = try request.params.optionalBool("clearMemory") ?? false
             return entry.queue.schedule {
+                try WorkQueue.commit()
                 await entry.npc.resetConversation(clearingMemory: clearMemory)
                 return ["npc": .string(entry.id)]
             }
@@ -273,6 +274,7 @@ enum NPCMethods {
                 warnings += parsed.warnings
             }
 
+            try WorkQueue.commit()
             do throws(AgentError) {
                 try apply(tools: tools, options: options, to: npc)
             } catch {
@@ -369,6 +371,9 @@ final class DialogueDriver: Sendable {
                             cancel(request, callID: record.call.id, reason: record.output.modelText)
                         }
                     case .completed(let turn):
+                        // The turn is in the NPC's history now: report it
+                        // even if a cancellation arrives before the response.
+                        WorkQueue.markCommitted()
                         return .success(turn)
                     default:
                         break

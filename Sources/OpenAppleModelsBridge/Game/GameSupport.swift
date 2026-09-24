@@ -1,7 +1,6 @@
 import Foundation
 import OpenAppleModels
 import OpenAppleModelsGame
-import Synchronization
 
 // MARK: - Error codes
 
@@ -60,73 +59,6 @@ extension BridgeError {
     public static func subscriptionNotFound(_ id: String) -> BridgeError {
         BridgeError(code: Code.subscriptionNotFound, name: "subscription_not_found",
                     message: "No world subscription with id '\(id)'.", extra: ["subscription": .string(id)])
-    }
-}
-
-// MARK: - Ordered work
-
-/// Runs operations one after another in the order they were scheduled.
-/// Each NPC has one, so pipelined `npc/talk`, `npc/update` and `npc/state`
-/// requests apply in arrival order.
-final class WorkQueue: Sendable {
-    private struct State {
-        var tail: Task<Void, Never>?
-        var work: [Int: Task<Void, Never>] = [:]
-        var nextToken = 0
-    }
-
-    private let state = Mutex(State())
-
-    /// Queues `work` behind earlier work and returns a reply that completes
-    /// with its result. Call from the (ordered) method handler.
-    func schedule(_ work: @escaping @Sendable () async throws -> JSONValue) -> BridgeReply {
-        let outcome = OneShot<Result<JSONValue, BridgeError>>()
-        let token = state.withLock { state -> Int in
-            let token = state.nextToken
-            state.nextToken += 1
-            let previous = state.tail
-            let task = Task { [self] in
-                await previous?.value
-                let result: Result<JSONValue, BridgeError>
-                if Task.isCancelled {
-                    result = .failure(.cancelled("The request was cancelled before it started."))
-                } else {
-                    do {
-                        result = .success(try await work())
-                    } catch {
-                        result = .failure(BridgeError(normalizing: error))
-                    }
-                }
-                _ = self.state.withLock { $0.work.removeValue(forKey: token) }
-                outcome.resolve(result)
-            }
-            state.tail = task
-            state.work[token] = task
-            return token
-        }
-        return .deferred { [self] in
-            let result = await withTaskCancellationHandler {
-                await outcome.value()
-            } onCancel: {
-                self.cancel(token: token)
-            }
-            return try result.get()
-        }
-    }
-
-    /// Cancels running and queued work; returns how many operations were cancelled.
-    @discardableResult
-    func cancelAll() -> Int {
-        let tasks = state.withLock { Array($0.work.values) }
-        for task in tasks { task.cancel() }
-        return tasks.count
-    }
-
-    /// Operations running or waiting.
-    var pendingOperations: Int { state.withLock { $0.work.count } }
-
-    private func cancel(token: Int) {
-        state.withLock { $0.work[token] }?.cancel()
     }
 }
 
@@ -213,12 +145,14 @@ enum GameJSON {
 
     /// Seconds → duration; 0 means no limit.
     static func timeout(seconds: Double) -> Duration? {
-        seconds == 0 ? nil : .milliseconds(Int((seconds * 1000).rounded()))
+        BridgeCoding.timeout(seconds: seconds)
     }
 
+    /// Duration → `toolTimeoutSeconds` (0 = no limit), capped at what
+    /// ``BridgeParams/optionalSeconds(_:)`` accepts so saved values parse again.
     static func seconds(_ duration: Duration?) -> Double {
         guard let duration else { return 0 }
         let components = duration.components
-        return Double(components.seconds) + Double(components.attoseconds) / 1e18
+        return min(Double(components.seconds) + Double(components.attoseconds) / 1e18, BridgeParams.maxTimeoutSeconds)
     }
 }

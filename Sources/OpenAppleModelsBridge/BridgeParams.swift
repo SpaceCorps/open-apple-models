@@ -73,11 +73,30 @@ public struct BridgeParams: Sendable {
         return int
     }
 
-    public func optionalDouble(_ key: String, minimum: Double? = nil) throws(BridgeError) -> Double? {
+    /// A finite number (NaN and infinities, which in-process callers and
+    /// out-of-range literals such as `1e999` can produce, are rejected).
+    public func optionalDouble(_ key: String, minimum: Double? = nil, maximum: Double? = nil) throws(BridgeError) -> Double? {
         guard let value = self[key] else { return nil }
         guard let double = value.doubleValue else { throw mistyped(key, "a number", value) }
+        guard double.isFinite else { throw .invalidParams("Parameter '\(name(key))' must be a finite number.") }
         if let minimum, double < minimum { throw .invalidParams("Parameter '\(name(key))' must be at least \(minimum).") }
+        if let maximum, double > maximum { throw .invalidParams("Parameter '\(name(key))' must be at most \(maximum).") }
         return double
+    }
+
+    /// The largest accepted `…TimeoutSeconds` value: one day. `0` means no limit.
+    public static let maxTimeoutSeconds: Double = 86_400
+
+    /// A time limit in seconds (`timeoutSeconds`, `toolTimeoutSeconds`): a
+    /// finite number from 0 (no limit) to ``maxTimeoutSeconds``. Convert it
+    /// with ``BridgeCoding/timeout(seconds:)``.
+    public func optionalSeconds(_ key: String) throws(BridgeError) -> Double? {
+        guard let value = self[key] else { return nil }
+        guard let seconds = value.doubleValue, seconds.isFinite, (0...Self.maxTimeoutSeconds).contains(seconds) else {
+            let shown = value.serialized()
+            throw .invalidParams("Parameter '\(name(key))' must be a number of seconds from 0 to \(Int(Self.maxTimeoutSeconds)) (0 means no limit); got \(shown.count > 80 ? shown.prefix(77) + "..." : shown).")
+        }
+        return seconds
     }
 
     public func optionalBool(_ key: String) throws(BridgeError) -> Bool? {

@@ -32,7 +32,7 @@ enum DecisionMethods {
                 instructions: try params.optionalString("instructions"),
                 temperature: try params.optionalDouble("temperature", minimum: 0),
                 maxToolRounds: try params.optionalInt("maxToolRounds", minimum: 0) ?? 2)
-            toolTimeout = try params.optionalDouble("toolTimeoutSeconds", minimum: 0).map(GameJSON.timeout(seconds:))
+            toolTimeout = try params.optionalSeconds("toolTimeoutSeconds").map(GameJSON.timeout(seconds:))
                 ?? bridge.configuration.defaultToolTimeout
         }
     }
@@ -172,7 +172,7 @@ enum DecisionMethods {
         let generator = ContentGenerator(model: model, temperature: try params.optionalDouble("temperature", minimum: 0))
         var tools: [AgentTool] = []
         if let value = params["tools"] {
-            let timeout = try params.optionalDouble("toolTimeoutSeconds", minimum: 0).map(GameJSON.timeout(seconds:))
+            let timeout = try params.optionalSeconds("toolTimeoutSeconds").map(GameJSON.timeout(seconds:))
                 ?? request.engine.configuration.defaultToolTimeout
             let parsed = try ForwardedTools.tools(from: value, path: "tools", request: request, context: [:], defaultTimeout: timeout)
             tools = parsed.tools

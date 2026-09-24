@@ -42,14 +42,18 @@ Requires Python 3.9+. Protocol reference: docs/PROTOCOL.md.
 
 import asyncio
 import atexit
+import contextlib
 import ctypes
 import ctypes.util
+import datetime
+import decimal
+import enum
 import inspect
 import itertools
 import json
 import os
 import threading
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, Iterable, Iterator, List, Optional, Union
 
 __all__ = ["Bridge", "BridgeError", "NPC", "Session", "ToolError", "ToolContext", "World",
            "find_library", "load_library"]
@@ -129,6 +133,43 @@ def load_library(path: Optional[str] = None) -> ctypes.CDLL:
 
 
 # --------------------------------------------------------------------------------------------
+# JSON encoding
+# --------------------------------------------------------------------------------------------
+
+def _json_default(value: Any) -> Any:
+    """Converts common non-JSON Python values (sets, Decimal, numpy scalars and arrays,
+    dates, enums, bytes) to JSON; anything else raises TypeError."""
+    if isinstance(value, (set, frozenset)):
+        return list(value)
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            raise ValueError("Out of range decimal values are not JSON compliant: {}".format(value))
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    if hasattr(value, "tolist") and callable(value.tolist):  # numpy arrays and scalars
+        return value.tolist()
+    if hasattr(value, "item") and callable(value.item):  # other array-library scalars
+        return value.item()
+    if isinstance(value, dict) or hasattr(value, "keys"):
+        return dict(value)
+    if isinstance(value, (tuple, list)) or hasattr(value, "__iter__"):
+        return list(value)
+    raise TypeError("Object of type {} is not JSON serializable".format(type(value).__name__))
+
+
+def _encode(message: Any) -> bytes:
+    """Strict JSON for the bridge: NaN and infinities raise ValueError (the bridge only
+    accepts standard JSON), unsupported types raise TypeError."""
+    return json.dumps(message, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+                      default=_json_default).encode("utf-8")
+
+
+# --------------------------------------------------------------------------------------------
 # Errors and tool helpers
 # --------------------------------------------------------------------------------------------
 
@@ -202,20 +243,32 @@ class _Tool:
 # Bridge
 # --------------------------------------------------------------------------------------------
 
+def _shut_down_error(message: str = "The bridge was closed.") -> BridgeError:
+    return BridgeError(-32023, message, {"code": "shut_down"})
+
+
 class Bridge:
     """One bridge instance (one ``oam_bridge``), bound to an asyncio event loop.
 
     Messages from the bridge arrive on a background thread and are handed to the
     loop with ``call_soon_threadsafe``; every future, event handler and tool
-    handler runs on the loop's thread.
+    handler runs on the loop's thread. The bridge binds to the loop of its first
+    request and moves to a new loop once that one has stopped (for example
+    across ``asyncio.run`` calls) if no request is pending.
 
     Always :meth:`close` the bridge (or use it as a context manager). An unclosed
     bridge stays alive until the interpreter exits, when it is destroyed.
+    Values sent to the bridge must be strict JSON: NaN and infinities raise
+    ``ValueError``; sets, ``Decimal``, numpy values, dates and enums are converted.
     """
 
     def __init__(self, library: Optional[str] = None, loop: Optional[asyncio.AbstractEventLoop] = None):
         self._lib = load_library(library)
         self._loop = loop
+        # Native calls in flight (send, call_blocking); close() waits for them before destroying
+        # the handle, so a concurrent close never frees it mid-call.
+        self._native_condition = threading.Condition()
+        self._native_calls = 0
         self._ids = itertools.count(1)
         self._pending: Dict[str, "asyncio.Future[Any]"] = {}
         self._event_handlers: Dict[Any, Callable[[Dict[str, Any]], None]] = {}
@@ -259,14 +312,35 @@ class Bridge:
 
     def _destroy_native(self) -> bool:
         """Destroys the native bridge once; returns False if it was already destroyed."""
-        with _live_lock:
-            if self._closed:
-                return False
-            self._closed = True
-            _live_bridges.pop(id(self), None)
+        with self._native_condition:
+            with _live_lock:
+                if self._closed:
+                    return False
+                self._closed = True  # new native calls now raise shut_down
+                _live_bridges.pop(id(self), None)
+            if self._native_calls:
+                # A call_blocking may be waiting for a slow turn: shutting down cancels it.
+                self._lib.oam_bridge_send(self._handle, b'{"jsonrpc":"2.0","method":"shutdown"}')
+                while self._native_calls:
+                    self._native_condition.wait()
         # Waits for an in-flight callback; ctypes releases the GIL during the call.
         self._lib.oam_bridge_destroy(self._handle)
         return True
+
+    @contextlib.contextmanager
+    def _native_handle(self) -> Iterator[ctypes.c_void_p]:
+        """The live handle for one native call; raises shut_down once the bridge is closed."""
+        with self._native_condition:
+            if self._closed:
+                raise _shut_down_error()
+            self._native_calls += 1
+        try:
+            yield self._handle
+        finally:
+            with self._native_condition:
+                self._native_calls -= 1
+                if not self._native_calls:
+                    self._native_condition.notify_all()
 
     async def __aenter__(self) -> "Bridge":
         self._bind_loop()
@@ -282,18 +356,34 @@ class Bridge:
         self.close()
 
     def _bind_loop(self) -> asyncio.AbstractEventLoop:
-        if self._loop is None:
-            self._loop = asyncio.get_running_loop()
-        return self._loop
+        """The loop messages are delivered to: the running loop. A bridge moves to a new loop
+        only when its previous loop has stopped and no request is waiting on it."""
+        running = asyncio.get_running_loop()
+        loop = self._loop
+        if loop is running:
+            return loop
+        if loop is not None and not loop.is_closed() and loop.is_running():
+            raise RuntimeError("This Bridge is bound to another running event loop; "
+                               "use one Bridge per event loop.")
+        if self._pending:
+            raise RuntimeError("This Bridge still has {} request(s) pending on its previous event loop; "
+                               "close it or finish them there before using it from a new loop."
+                               .format(len(self._pending)))
+        self._loop = running
+        return running
 
     # ---- low-level messaging -----------------------------------------------------------------
 
     def send_message(self, message: Dict[str, Any]) -> None:
-        """Sends one raw JSON-RPC message."""
+        """Sends one raw JSON-RPC message. Raises ``ValueError``/``TypeError`` for values
+        that are not strict JSON (see the class docs)."""
         if self._closed:
-            raise BridgeError(-32023, "The bridge was closed.", {"code": "shut_down"})
-        line = json.dumps(message, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        status = self._lib.oam_bridge_send(self._handle, line)
+            raise _shut_down_error()
+        self._send_line(_encode(message))
+
+    def _send_line(self, line: bytes) -> None:
+        with self._native_handle() as handle:
+            status = self._lib.oam_bridge_send(handle, line)
         if status != 0:
             raise OSError("oam_bridge_send failed with status {}".format(status))
 
@@ -313,15 +403,16 @@ class Bridge:
         """
         loop = self._bind_loop()
         request_id = "py-{}".format(next(self._ids))
+        message: Dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            message["params"] = params
+        line = _encode(message)  # serialization errors surface before anything is registered
         future: "asyncio.Future[Any]" = loop.create_future()
         self._pending[request_id] = future
         if on_event is not None:
             self._event_handlers[request_id] = on_event
-        message: Dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
-        if params is not None:
-            message["params"] = params
         try:
-            self.send_message(message)
+            self._send_line(line)
             return await future
         finally:
             self._pending.pop(request_id, None)
@@ -330,12 +421,16 @@ class Bridge:
     def call_blocking(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 30.0) -> Any:
         """Synchronous request/response via ``oam_call_blocking`` (no asyncio needed).
 
-        Do not use for sessions with tools: tool/call requests need the event loop.
+        Do not use for sessions with tools: tool/call requests need the event loop. Streamed
+        notifications carry this call's id (``"py-<n>"``) as ``requestId``. Safe to call from
+        any thread; :meth:`close` cancels an in-flight call and waits for it to return.
         """
-        message: Dict[str, Any] = {"jsonrpc": "2.0", "id": 0, "method": method}
+        message: Dict[str, Any] = {"jsonrpc": "2.0", "id": "py-{}".format(next(self._ids)), "method": method}
         if params is not None:
             message["params"] = params
-        raw = self._lib.oam_call_blocking(self._handle, json.dumps(message).encode("utf-8"), int(timeout * 1000))
+        line = _encode(message)
+        with self._native_handle() as handle:
+            raw = self._lib.oam_call_blocking(handle, line, int(timeout * 1000))
         if not raw:
             raise OSError("oam_call_blocking failed")
         try:
@@ -613,17 +708,26 @@ class Bridge:
             value = tool.handler(context.arguments, context) if tool.wants_context else tool.handler(context.arguments)
             if inspect.isawaitable(value):
                 value = await value
-            result: Dict[str, Any] = {"output": value if value is not None else ""}
+            # Encoded here so an output that is not strict JSON (NaN, an unknown type)
+            # becomes an error the model sees instead of a reply that is never sent.
+            line = _encode({"jsonrpc": "2.0", "id": request_id,
+                            "result": {"output": value if value is not None else ""}})
         except asyncio.CancelledError:
             return  # the bridge sent tool/cancel; it no longer wants the output
         except Exception as error:
-            result = {"output": str(error) or type(error).__name__, "isError": True}
-        if not self._closed:
-            self.send_message({"jsonrpc": "2.0", "id": request_id, "result": result})
+            line = _encode({"jsonrpc": "2.0", "id": request_id,
+                            "result": {"output": str(error) or type(error).__name__, "isError": True}})
+        self._send_quietly(line)
 
     def _reply_error(self, request_id: Any, code: int, text: str) -> None:
-        if not self._closed:
-            self.send_message({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": text}})
+        self._send_quietly(_encode({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": text}}))
+
+    def _send_quietly(self, line: bytes) -> None:
+        """Sends a reply to the bridge unless it was closed meanwhile (then nobody waits for it)."""
+        try:
+            self._send_line(line)
+        except BridgeError:
+            pass
 
 
 class Session:

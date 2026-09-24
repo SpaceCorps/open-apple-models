@@ -389,7 +389,9 @@ extension JSONValue {
 
     static func format(number: Double) -> String {
         guard number.isFinite else { return "null" }
-        if number.rounded() == number, abs(number) < 1e15 {
+        // Integral values print as integers (exact up to 2^53, and as the
+        // exact double value beyond that) instead of exponent notation.
+        if number.rounded() == number, abs(number) < 9.2e18 {
             return String(Int64(number))
         }
         return "\(number)"

@@ -149,7 +149,7 @@ public enum GameCoding {
         guard var object = value.objectValue else { throw .invalidParams("'\(path)' must be an object.") }
         let warnings = unknownKeys(object, allowed: npcOptionKeys, path: path)
         let params = BridgeParams(object, path: path + ".")
-        let timeout = try params.optionalDouble("toolTimeoutSeconds", minimum: 0)
+        let timeout = try params.optionalSeconds("toolTimeoutSeconds")
         object["toolTimeoutSeconds"] = nil
         if let tools = object["memoryTools"], !tools.isNull, tools.intValue == nil {
             object["memoryTools"] = .number(Double(try memoryTools(tools, path: path + ".memoryTools").rawValue))

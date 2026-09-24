@@ -5,7 +5,9 @@
 """
 
 import asyncio
+import decimal
 import gc
+import threading
 import time
 import unittest
 
@@ -40,6 +42,64 @@ class BlockingTests(unittest.TestCase):
                 bridge.call_blocking("session/respond", {"session": session["session"], "prompt": "hi"}, timeout=0.2)
             self.assertEqual(caught.exception.code, -32024)
             self.assertLess(time.monotonic() - started, 2.0)
+
+
+class LifetimeTests(unittest.TestCase):
+    def test_call_blocking_after_close_raises(self):
+        bridge = Bridge()
+        bridge.close()
+        with self.assertRaises(BridgeError) as caught:
+            bridge.call_blocking("ping")
+        self.assertEqual(caught.exception.name, "shut_down")
+
+    def test_close_cancels_an_in_flight_blocking_call(self):
+        bridge = Bridge()
+        session = bridge.call_blocking("session/create", {"model": scripted({"text": "late", "delayMs": 5000})})
+        errors = []
+
+        def worker():
+            try:
+                bridge.call_blocking("session/respond", {"session": session["session"], "prompt": "hi"}, timeout=20)
+            except BridgeError as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        time.sleep(0.2)
+        started = time.monotonic()
+        bridge.close()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual([error.name for error in errors], ["cancelled"])
+
+    def test_bridge_moves_to_a_new_event_loop(self):
+        bridge = Bridge()
+        try:
+            async def ping():
+                return await bridge.request("ping")
+            self.assertEqual(asyncio.run(ping()), {})
+            self.assertEqual(asyncio.run(ping()), {})  # a second, new loop
+        finally:
+            bridge.close()
+
+    def test_bridge_refuses_a_second_running_loop(self):
+        bridge = Bridge()
+        other = asyncio.new_event_loop()
+        thread = threading.Thread(target=other.run_forever, daemon=True)
+        thread.start()
+        try:
+            self.assertEqual(asyncio.run_coroutine_threadsafe(bridge.request("ping"), other).result(5), {})
+
+            async def ping():
+                return await bridge.request("ping")
+            with self.assertRaises(RuntimeError):
+                asyncio.run(ping())
+        finally:
+            other.call_soon_threadsafe(other.stop)
+            thread.join(5)
+            other.close()
+            bridge.close()
 
 
 class AsyncTests(unittest.IsolatedAsyncioTestCase):
@@ -147,6 +207,60 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.name, "shut_down")
         with self.assertRaises(BridgeError):
             bridge.notify("ping")
+
+    async def test_values_that_are_not_strict_json(self):
+        async with Bridge() as bridge:
+            @bridge.tool("stats", "Stats.", None)
+            def stats(args):
+                return {"tags": {"iron"}, "price": decimal.Decimal("1.50"), "count": decimal.Decimal(3)}
+
+            @bridge.tool("broken", "Broken.", None)
+            def broken(args):
+                return {"ratio": float("nan")}
+
+            session = await bridge.create_session(tools=["stats", "broken"], model=scripted(
+                {"toolCalls": [{"name": "stats"}]}, {"toolCalls": [{"name": "broken"}]}, {"text": "done"}))
+            reply = await asyncio.wait_for(session.respond("go"), 5)
+            converted, failed = reply["toolCalls"]
+            self.assertEqual((converted["output"], converted["isError"]), ({"tags": ["iron"], "price": 1.5, "count": 3}, False))
+            self.assertTrue(failed["isError"])
+            self.assertIn("JSON", failed["output"])
+            # Request params are checked before anything is sent or registered.
+            with self.assertRaises(ValueError):
+                await bridge.request("ping", {"x": float("inf")})
+            with self.assertRaises(TypeError):
+                await bridge.request("ping", {"x": object()})
+            self.assertEqual(bridge._pending, {})
+            self.assertEqual(await bridge.request("ping"), {})
+
+    async def test_numpy_values_are_converted(self):
+        try:
+            import numpy
+        except ImportError:
+            self.skipTest("numpy is not installed")
+        async with Bridge() as bridge:
+            @bridge.tool("scores", "Scores.", None)
+            def scores(args):
+                return {"best": numpy.int64(7), "all": numpy.arange(3), "mean": numpy.float32(0.5)}
+
+            session = await bridge.create_session(tools=["scores"], model=scripted(
+                {"toolCalls": [{"name": "scores"}]}, {"text": "done"}))
+            reply = await asyncio.wait_for(session.respond("go"), 5)
+            self.assertEqual(reply["toolCalls"][0]["output"], {"best": 7, "all": [0, 1, 2], "mean": 0.5})
+
+    async def test_blocking_call_events_carry_its_request_id(self):
+        async with Bridge() as bridge:
+            events = []
+            bridge.on_notification("session/event", events.append)
+            session = await bridge.create_session(model=scripted({"text": "hi there", "chunks": 2}))
+            loop = asyncio.get_running_loop()
+            reply = await loop.run_in_executor(None, lambda: bridge.call_blocking(
+                "session/respond", {"session": session.id, "prompt": "x", "stream": True}))
+            await asyncio.sleep(0.05)
+            self.assertEqual(reply["text"], "hi there")
+            ids = {event["requestId"] for event in events}
+            self.assertEqual(len(ids), 1)
+            self.assertTrue(next(iter(ids)).startswith("py-"))
 
     async def test_unclosed_bridge_stays_alive_until_closed(self):
         bridge = Bridge()

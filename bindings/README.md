@@ -21,6 +21,14 @@ Requirements: macOS / iOS / visionOS 27 with Apple Intelligence for the real mod
 the **scripted model** (`"model": {"type": "scripted", ...}`), so you can develop and run CI anywhere the library
 loads, without Apple Intelligence.
 
+> **Set the minimum OS to 27.** The library links FoundationModels 27 APIs strongly (not weakly), so it cannot load
+> on older systems. Every app that embeds it — Unity, Xcode, Godot or Unreal projects for iOS, visionOS and macOS —
+> must set its minimum OS / deployment target to **27.0** (Unity: *Player Settings → Other Settings → Target minimum
+> iOS Version* / *Target minimum visionOS Version*; Xcode: *Minimum Deployments*; macOS apps: `LSMinimumSystemVersion`
+> 27.0). With a lower minimum the app builds and installs on older OS versions and then **crashes at launch** with a
+> missing-symbol error; it does not degrade gracefully. To support older systems, ship a separate build (or load the
+> library only after an OS version check, e.g. `dlopen` from a plugin loaded on 27+).
+
 ## Building the library
 
 ### macOS (dylib)
@@ -48,7 +56,7 @@ clang -I bindings/c bindings/c/example.c -L .build/release -lOpenAppleModelsFFI 
 ### iOS / visionOS (XCFramework, requires Xcode)
 
 SwiftPM cannot cross-compile for iOS with Command Line Tools alone; use Xcode 27 (not verified on the machine this
-was written on, which has no Xcode):
+was written on, which has no Xcode). The framework's minimum OS is 27.0, and so must be the app's (see above):
 
 ```sh
 # Device and simulator builds of the dynamic library product.
@@ -76,8 +84,11 @@ call it from C/C++/Objective-C. For visionOS use `generic/platform=visionOS` (an
 1. Copy `unity/OpenAppleModels.cs` into `Assets/`.
 2. macOS (editor and standalone): copy `libOpenAppleModelsFFI.dylib` to `Assets/Plugins/macOS/` and enable it for
    Editor + Standalone (macOS, Apple Silicon) in the plugin inspector.
-3. iOS: copy `OpenAppleModelsFFI.xcframework` (or the device `.framework`) to `Assets/Plugins/iOS/` and tick
-   **Add to Embedded Binaries**. The C# code uses `[DllImport("__Internal")]` on iOS automatically.
+3. iOS / visionOS: copy `OpenAppleModelsFFI.xcframework` (or the device `.framework`) to `Assets/Plugins/iOS/`
+   (or `Assets/Plugins/visionOS/`) and tick **Add to Embedded Binaries**. The C# code uses
+   `[DllImport("__Internal")]` there automatically. **Set Player Settings → Other Settings → Target minimum iOS
+   Version (or visionOS Version) to 27.0**: Unity's lower default builds fine but the app crashes at launch on
+   older devices.
 4. Create the bridge once and let the runner pump it on the main thread:
 
 ```csharp
@@ -99,10 +110,14 @@ var result = await guard.RespondAsync("Please open the north gate.", onText: del
 ```
 
 Threading: the native callback copies each message into a queue; `Pump()` (called by `OamBridgeRunner.Update`)
-completes tasks, raises events and invokes tool handlers **on the main thread**, so Unity APIs are safe in them.
-`ToolReply.Ok/Error` may be called from any thread, any time later; `ToolReply.Cancelled` fires if the bridge gives
-up on the call (timeout or cancelled turn). The static callback is marked `[MonoPInvokeCallback]` for IL2CPP.
-Outside Unity the same file compiles for plain .NET (call `Pump()` yourself or pass `dispatchOnCallbackThread: true`).
+completes tasks, raises events, invokes tool handlers and the callback-style `Request(method, params, onResult,
+onError)` callbacks **on the main thread**, so Unity APIs are safe in them. (`await`ed tasks resume wherever your
+`SynchronizationContext` puts them — Unity's main thread by default.) `ToolReply.Ok/Error` may be called from any
+thread, any time later; `ToolReply.Cancelled` fires if the bridge gives up on the call (timeout or cancelled turn).
+`SendMessage`, `CallBlocking` and `Dispose` are thread-safe: `Dispose` cancels an in-flight `CallBlocking`, waits
+for native calls on other threads to return, and destroys the bridge exactly once. The static callback is marked
+`[MonoPInvokeCallback]` for IL2CPP. Outside Unity the same file compiles for plain .NET (call `Pump()` yourself or
+pass `dispatchOnCallbackThread: true`).
 
 Guardrails can reject violent game content (`OamException.Name == "guardrail_violation"`); catch it and show a
 fallback line. NPCs do this for you (`isFallback` in the turn).
@@ -171,9 +186,14 @@ asyncio.run(main())
 
 The library is found through `Bridge(library=...)`, `OAM_LIBRARY`, `.build/release`, `.build/debug`, then the
 system path. Messages arrive on a bridge thread and are handed to the asyncio loop; tool handlers (sync or async)
-run on the loop and may raise `ToolError` to report a failure to the model. `bridge.call_blocking(method, params)`
-is a synchronous helper for simple calls (not for sessions with tools). Close bridges (or use `async with`); an
-unclosed bridge is kept alive, never garbage collected under the native callback, and destroyed at interpreter exit.
+run on the loop and may raise `ToolError` to report a failure to the model. A bridge follows you to a new event loop
+(e.g. a second `asyncio.run`) once the old loop has stopped and no request is pending; using it from two running
+loops at once raises `RuntimeError`. Everything sent must be strict JSON: sets, `Decimal`, numpy values, dates and
+enums are converted, NaN/infinity raise `ValueError` (from `request()`, before anything is sent), and a tool result
+that cannot be encoded reaches the model as an error output. `bridge.call_blocking(method, params)` is a
+synchronous, thread-safe helper for simple calls (not for sessions with tools); `close()` cancels an in-flight one.
+Close bridges (or use `async with`); an unclosed bridge is kept alive, never garbage collected under the native
+callback, and destroyed at interpreter exit.
 
 ## Godot
 
@@ -207,5 +227,8 @@ bridge per game instance, and call `oam_bridge_destroy` in `ShutdownModule` or t
 4. Answer `tool/call` requests (id `t-<n>`) with `{"output": …}` or `{"output": "...", "isError": true}`; stop work on
    `tool/cancel`.
 5. On shutdown call `oam_bridge_destroy` (it waits for an in-flight callback; nothing arrives afterwards) and fail
-   outstanding futures.
-6. Test against the scripted model (see `python/test_bridge.py` for a checklist of behaviors).
+   outstanding futures. If other threads may be inside `oam_bridge_send`/`oam_call_blocking`, mark the bridge
+   closed, send `{"jsonrpc":"2.0","method":"shutdown"}` to cancel blocking calls, wait for those calls to return
+   (an in-flight counter under a lock), and only then destroy — a freed handle must never reach the C ABI.
+6. Send strict JSON (no NaN/Infinity). Prefer string request ids; numeric ids must stay within ±(2^53-1).
+7. Test against the scripted model (see `python/test_bridge.py` for a checklist of behaviors).

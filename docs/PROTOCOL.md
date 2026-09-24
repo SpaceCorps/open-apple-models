@@ -12,7 +12,7 @@ It is one [JSON-RPC 2.0](https://www.jsonrpc.org/specification) protocol with th
 |---|---|---|
 | stdio | `oam stdio` reads requests from stdin and writes messages to stdout, one JSON object per line | any language that can spawn a process |
 | C ABI | `libOpenAppleModelsFFI` (`bindings/c/open_apple_models.h`): `oam_bridge_send()` in, a callback out | Unity (C#), Godot, Unreal, Python (ctypes), Rust… |
-| Swift | `BridgeEngine.receive(_:)` / `send` closure, or `BridgeEngine.call(_:_:)` in-process | the two above, tests, Swift hosts |
+| Swift | `BridgeEngine.receive(_:)` / `send` closure, or `BridgeEngine.call(_:_:id:)` in-process | the two above, tests, Swift hosts |
 
 Bindings: `bindings/python/open_apple_models.py`, `bindings/unity/OpenAppleModels.cs`, `bindings/c/example.c`
 (see `bindings/README.md`).
@@ -25,7 +25,10 @@ Bindings: `bindings/python/open_apple_models.py`, `bindings/unity/OpenAppleModel
   Over stdio, messages are separated by `\n`. Through the C ABI, each call/callback carries exactly one message
   (no trailing newline).
 * `"jsonrpc": "2.0"` is required on every message.
-* Request ids may be strings or numbers and are echoed back exactly. `null` ids are rejected.
+* Request ids may be strings or numbers and are echoed back exactly (integers always as plain digits, also in
+  `requestId`). Numbers travel as doubles, so a numeric id must be at most 2^53-1 (9007199254740991) in magnitude;
+  larger or non-finite numbers are rejected with `-32600` (`id` `null`) rather than echoed back altered — use string
+  ids for 64-bit values. `null` ids are rejected.
 * Batches (JSON arrays) are **not supported**: send one message per line.
 * Params are always **by name** (an object). Absent params mean `{}`. `null` members are treated as absent.
 * Unknown members in `session/create`, `session/respond`, `npc/create`, `npc/restore`, `npc/talk`, `npc/update`,
@@ -183,7 +186,7 @@ Creates an agent with its own conversation.
 | `temperature` | number ≥ 0 | model default | |
 | `maxResponseTokens` | int ≥ 1 | none | |
 | `sampling` | `"greedy"` / `{"topK": n, "seed"?}` / `{"topP": p, "seed"?}` | model default | `"greedy"` makes NPC decisions reproducible |
-| `toolTimeoutSeconds` | number ≥ 0 | 120 | time the engine has to answer a `tool/call`; `0` = wait forever |
+| `toolTimeoutSeconds` | number 0…86400 | 120 | time the engine has to answer a `tool/call`; `0` = wait forever. Larger, negative or non-finite values fail with `-32602` |
 | `trimHistory` | bool | `true` | hide the oldest turns from the model when the 8192-token context would overflow (the transcript keeps them) |
 | `reservedResponseTokens` | int ≥ 0 | 1024 | tokens kept free for the answer when trimming |
 | `maxAttempts` | int ≥ 1 | 2 | automatic retries of transient model failures (never after a tool ran) |
@@ -202,7 +205,7 @@ Runs one turn.
 | `prompt` | string | required. `""` is allowed (continues the conversation, e.g. after a restored tool output) |
 | `schema` | object | JSON Schema for [structured output](#json-schema-support); tools may be called first, then the answer is generated as schema-valid JSON |
 | `stream` | bool | `false`. When true, `session/event` notifications are sent while the turn runs |
-| `toolChoice`, `maxToolRounds`, `maxToolCalls`, `enabledTools` | | per-turn overrides of the session options |
+| `toolChoice`, `maxToolRounds`, `maxToolCalls`, `enabledTools` | | per-turn overrides of the session options. A `{"tool": name}` the session lacks fails with `-32602`; it is checked when the turn starts, so an earlier pipelined `session/setTools` counts |
 
 Result:
 
@@ -234,8 +237,10 @@ Result:
 ### `session/cancel`
 
 `{"session"}` → `{"session", "cancelled": n}`. Cancels the running turn and every queued operation of the session.
-Each cancelled request gets error `-32009`. Outstanding `tool/call`s get `tool/cancel`. Also useful as a
-notification.
+Each cancelled request gets error `-32009` and leaves no trace (this includes `session/compact`: the history and
+context note stay as they were). An operation that has already taken effect — a turn whose response is complete,
+a setting already applied — is not counted and reports its result normally. Outstanding `tool/call`s get
+`tool/cancel`. Also useful as a notification. `session/delete` and `shutdown` cancel the same way.
 
 ### `session/reset`
 
@@ -278,6 +283,8 @@ quest state, a summary). Applies from the next turn.
 `{"session", "keepRecentTurns"?: 2, "summaryInstructions"?: string}` → `{"session", "summary": string | null}`.
 Summarizes all but the most recent turns into the context note (one extra model call) and drops them, so long
 conversations fit the 8192-token window while keeping their gist. `summary` is `null` when there was nothing to compact.
+Cancelling it (`session/cancel`, `session/delete`, `shutdown`) stops the model call; it then fails with `-32009` and
+changes nothing.
 
 ### `schema/validate`
 
@@ -291,7 +298,8 @@ generation schema without running the model. Invalid schemas fail with `-32007` 
 ### `shutdown`
 
 → `{}`. Cancels every turn and pending `tool/call`, deletes all sessions, and shuts down extensions; cancelled
-requests receive their error responses first (bounded wait). Afterwards every request fails with `-32023 shut_down`.
+requests receive their error responses first. The wait for them (and for extensions) is bounded to about 2 s; work
+that ignores cancellation answers later. Afterwards every request fails with `-32023 shut_down`.
 Hosts get a callback after the response has been delivered (`BridgeConfiguration.onShutdown`), which a
 stdio server uses to exit.
 
@@ -362,7 +370,7 @@ Emotions: `neutral`, `happy`, `sad`, `angry`, `afraid`, `surprised`, `suspicious
 | `groundingTool` | none | a tool the NPC must call first on every turn (e.g. `"check_inventory"`, `"read_world_state"`). The small model often skips tools and invents facts in `auto` mode; this forces the lookup on the first step only |
 | `toolChoice` | `"auto"` | `"auto"`/`"none"`/`"required"`/`{"tool": name}`, used when `groundingTool` is not set |
 | `maxToolRounds`, `maxToolCalls` | 2, 6 | per turn |
-| `toolTimeoutSeconds` | 120 | time the engine has to answer a `tool/call` (`0` = forever); a tool's own `timeoutSeconds` wins |
+| `toolTimeoutSeconds` | 120 | time the engine has to answer a `tool/call` (`0` = forever, at most 86400); a tool's own `timeoutSeconds` wins |
 | `worldReadable` | `[""]` | world paths `read_world_state` may read (`""` = everything, `[]` = no read tool) |
 | `worldWritable` | `[]` | world paths `update_world_state` may change (`[]` = no write tool) |
 | `worldContextPaths` | `[]` | world paths summarized into every prompt (cheap grounding without a tool round) |
@@ -554,7 +562,8 @@ Sent only for turns started with `"stream": true`.
  "params": {"session": "guard", "requestId": 3, "event": {"type": "text", "delta": " gate", "text": "The north gate", "isReset": false}}}
 ```
 
-`requestId` is the id of the `session/respond` request. Event types:
+`requestId` is the id of the `session/respond` request (for `oam_call_blocking`, the `id` in its request JSON;
+without one, a private `local-<n>` id). Event types:
 
 | `type` | Fields | Meaning |
 |---|---|---|
@@ -636,7 +645,7 @@ Error responses follow JSON-RPC: `{"code": int, "message": string, "data": {"cod
 | Code | `data.code` | When |
 |---|---|---|
 | -32700 | `parse_error` | the line is not valid JSON (`id` is `null`) |
-| -32600 | `invalid_message` | not a JSON-RPC 2.0 message, bad `id`, batch |
+| -32600 | `invalid_message` | not a JSON-RPC 2.0 message, bad `id` (including numbers beyond ±(2^53-1)), batch |
 | -32601 | `method_not_found` | unknown method (`data.method`) |
 | -32602 | `invalid_params` | missing/mistyped parameter; the message names it (e.g. `'options.toolChoice'`) |
 | -32603 | `internal_error` | a bug; please report |
@@ -681,7 +690,9 @@ Codes -32050…-32056 belong to the game methods; other extensions use -32057…
 * `description`: what the tool does and returns — the model decides from it. Warned when missing.
 * `parameters`: JSON Schema of the arguments (default: no arguments).
 * `execution`: `"client"` (the only kind over the bridge): the engine executes it via `tool/call`.
-* `timeoutSeconds`: overrides `options.toolTimeoutSeconds` for this tool (`0` = none).
+* `timeoutSeconds`: overrides `options.toolTimeoutSeconds` for this tool (`0` = none). Like every
+  `…TimeoutSeconds` parameter it must be a finite number from 0 to 86400 (one day); anything else fails with
+  `-32602`.
 * OpenAI's `{"type": "function", "function": {…}}` wrapper is accepted.
 
 The on-device model often skips tools in `auto` mode and invents facts. For grounded game state, set
@@ -787,7 +798,12 @@ Rules of thumb:
   `.deferred { … }` for anything that awaits the model or other turns. Awaiting a turn inside a handler blocks
   every later request.
 * Use `BridgeSession.schedule { … }` (or your own queue, like the game methods' per-NPC queue) for per-object
-  ordering; start `Agent.run` in the handler so turn order equals arrival order.
+  ordering; start `Agent.run` in the handler so turn order equals arrival order. Scheduled work is cancelled by
+  `session/cancel`, `session/delete` and `shutdown`; work that still returns successfully after that is reported as
+  `-32009 cancelled`. Call `try BridgeSession.commit()` right before the work changes state: it throws if the
+  operation was cancelled, and otherwise makes it immune to later cancellation, so the reply always matches the state.
+* Read `…TimeoutSeconds` parameters with `BridgeParams.optionalSeconds(_:)` and convert them with
+  `BridgeCoding.timeout(seconds:)`: never convert client numbers with `Int(_:)`, which traps on huge values.
 * Throw `BridgeError` for protocol errors (`.invalidParams`, custom codes in -32057…-32099 with a `data.code`
   string); any other error (e.g. `AgentError`) is mapped automatically.
 * Reuse `BridgeParams` accessors (typed, with messages naming the parameter), `BridgeCoding` (tool definitions,

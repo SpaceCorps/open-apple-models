@@ -10,6 +10,8 @@
 //   * iOS: add OpenAppleModelsFFI.xcframework (a dynamic framework; build it with Xcode) to
 //     Assets/Plugins/iOS and embed it; calls go through [DllImport("__Internal")].
 //     See bindings/README.md.
+//   * Set the minimum OS (Player Settings > Target minimum iOS/visionOS Version) to 27.0: the
+//     library links FoundationModels 27 APIs strongly, so lower minimums crash at launch on older OSes.
 //   * Add an OamBridgeRunner component (or call bridge.Pump() from your own Update) so
 //     messages, results and tool calls are handled on the main thread.
 //
@@ -194,6 +196,23 @@ namespace OpenAppleModels
             {
                 // Disposed concurrently; the bridge no longer needs the output.
             }
+            catch (InvalidOperationException error)
+            {
+                // The output could not be serialized (e.g. nested too deeply) or sent. Tell the model, so the
+                // turn does not wait for the tool timeout; never throw into the caller's game code.
+                try
+                {
+                    _bridge.SendMessage(new Dictionary<string, object>
+                    {
+                        ["jsonrpc"] = "2.0", ["id"] = _rpcId,
+                        ["result"] = new Dictionary<string, object> { ["output"] = "The tool output could not be sent: " + error.Message, ["isError"] = true },
+                    });
+                }
+                catch (InvalidOperationException)
+                {
+                    // Disposed meanwhile (ObjectDisposedException is an InvalidOperationException).
+                }
+            }
         }
     }
 
@@ -207,13 +226,18 @@ namespace OpenAppleModels
 
         private readonly ConcurrentQueue<string> _inbox = new ConcurrentQueue<string>();
         private readonly object _lock = new object();
-        private readonly Dictionary<string, TaskCompletionSource<object>> _pending = new Dictionary<string, TaskCompletionSource<object>>();
+        /// <summary>Completion of each pending request: (result, null) or (null, error). Invoked on the dispatch thread.</summary>
+        private readonly Dictionary<string, Action<object, Exception>> _pending = new Dictionary<string, Action<object, Exception>>();
         private readonly Dictionary<string, Action<Dictionary<string, object>>> _eventHandlers = new Dictionary<string, Action<Dictionary<string, object>>>();
         private readonly Dictionary<string, Action<Dictionary<string, object>>> _worldHandlers = new Dictionary<string, Action<Dictionary<string, object>>>();
         private readonly Dictionary<string, RegisteredTool> _tools = new Dictionary<string, RegisteredTool>();
         private readonly Dictionary<string, ToolReply> _openCalls = new Dictionary<string, ToolReply>();
         private readonly bool _dispatchOnCallbackThread;
+        /// <summary>Guards <see cref="_handle"/> and <see cref="_nativeCalls"/>: Dispose waits until no native call
+        /// uses the handle before destroying it, so a concurrent SendMessage or CallBlocking never touches freed memory.</summary>
+        private readonly object _nativeLock = new object();
         private IntPtr _handle;
+        private int _nativeCalls;
         private GCHandle _self;
         private int _nextId;
 
@@ -244,7 +268,7 @@ namespace OpenAppleModels
 
         public static string Version => Native.FromUtf8(Native.oam_version());
 
-        public bool IsDisposed => _handle == IntPtr.Zero;
+        public bool IsDisposed { get { lock (_nativeLock) return _handle == IntPtr.Zero; } }
 
         [AOT.MonoPInvokeCallback(typeof(Native.MessageCallback))]
         private static void OnNativeMessage(IntPtr jsonLine, IntPtr userData)
@@ -283,35 +307,59 @@ namespace OpenAppleModels
         /// <paramref name="onEvent"/> receives the params of notifications tagged with this request.</summary>
         public Task<object> RequestAsync(string method, object parameters = null, Action<Dictionary<string, object>> onEvent = null)
         {
-            var id = "cs-" + Interlocked.Increment(ref _nextId).ToString(CultureInfo.InvariantCulture);
             var completion = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
-            lock (_lock)
+            StartRequest(method, parameters, onEvent, (result, error) =>
             {
-                _pending[id] = completion;
-                if (onEvent != null) _eventHandlers[id] = onEvent;
-            }
+                if (error != null) completion.TrySetException(error);
+                else completion.TrySetResult(result);
+            });
+            return completion.Task;
+        }
+
+        /// <summary>Callback-style request, for code that does not use async/await. <paramref name="onResult"/> or
+        /// <paramref name="onError"/> runs on the dispatch thread (inside <see cref="Pump"/>, or on the bridge thread
+        /// with dispatchOnCallbackThread), like every other handler; if the request cannot be sent it runs right away
+        /// on the calling thread.</summary>
+        public void Request(string method, object parameters, Action<object> onResult, Action<OamException> onError = null)
+        {
+            StartRequest(method, parameters, null, (result, error) =>
+            {
+                try
+                {
+                    if (error != null) onError?.Invoke(error as OamException ?? new OamException(-32603, error.Message));
+                    else onResult?.Invoke(result);
+                }
+                catch (Exception thrown)
+                {
+                    Log("request callback threw: " + thrown);
+                }
+            });
+        }
+
+        private void StartRequest(string method, object parameters, Action<Dictionary<string, object>> onEvent, Action<object, Exception> complete)
+        {
+            var id = "cs-" + Interlocked.Increment(ref _nextId).ToString(CultureInfo.InvariantCulture);
             var message = new Dictionary<string, object> { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method };
             if (parameters != null) message["params"] = parameters;
+            lock (_lock)
+            {
+                _pending[id] = complete;
+                if (onEvent != null) _eventHandlers[id] = onEvent;
+            }
             try
             {
                 SendMessage(message);
             }
             catch (Exception error)
             {
-                lock (_lock) { _pending.Remove(id); _eventHandlers.Remove(id); }
-                completion.TrySetException(error);
+                bool wasPending;
+                lock (_lock)
+                {
+                    wasPending = _pending.Remove(id);
+                    _eventHandlers.Remove(id);
+                }
+                if (wasPending) complete(null, error);
             }
-            return completion.Task;
-        }
-
-        /// <summary>Callback-style request, for code that does not use async/await.</summary>
-        public void Request(string method, object parameters, Action<object> onResult, Action<OamException> onError = null)
-        {
-            RequestAsync(method, parameters).ContinueWith(task =>
-            {
-                if (task.IsFaulted) onError?.Invoke(task.Exception?.InnerException as OamException ?? new OamException(-32603, task.Exception?.Message));
-                else onResult?.Invoke(task.Result);
-            }, TaskScheduler.Default);
         }
 
         /// <summary>Sends a notification (no response).</summary>
@@ -325,10 +373,14 @@ namespace OpenAppleModels
         /// <summary>Synchronous request via oam_call_blocking. Not for sessions with tools.</summary>
         public object CallBlocking(string method, object parameters = null, int timeoutMs = 30000)
         {
-            EnsureAlive();
-            var message = new Dictionary<string, object> { ["jsonrpc"] = "2.0", ["id"] = 0, ["method"] = method };
+            var id = "cs-" + Interlocked.Increment(ref _nextId).ToString(CultureInfo.InvariantCulture);
+            var message = new Dictionary<string, object> { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method };
             if (parameters != null) message["params"] = parameters;
-            var raw = Native.oam_call_blocking(_handle, Native.Utf8(Json.Serialize(message)), timeoutMs);
+            var request = Native.Utf8(Json.Serialize(message));
+            IntPtr raw;
+            var handle = AcquireHandle();
+            try { raw = Native.oam_call_blocking(handle, request, timeoutMs); }
+            finally { ReleaseHandle(); }
             if (raw == IntPtr.Zero) throw new InvalidOperationException("oam_call_blocking failed");
             string line;
             try { line = Native.FromUtf8(raw); } finally { Native.oam_string_free(raw); }
@@ -341,14 +393,31 @@ namespace OpenAppleModels
         /// <summary>Sends one raw JSON-RPC message. Thread-safe.</summary>
         public void SendMessage(Dictionary<string, object> message)
         {
-            EnsureAlive();
-            var status = Native.oam_bridge_send(_handle, Native.Utf8(Json.Serialize(message)));
+            var line = Native.Utf8(Json.Serialize(message));
+            int status;
+            var handle = AcquireHandle();
+            try { status = Native.oam_bridge_send(handle, line); }
+            finally { ReleaseHandle(); }
             if (status != 0) throw new InvalidOperationException("oam_bridge_send failed with status " + status);
         }
 
-        private void EnsureAlive()
+        /// <summary>Returns the live handle and counts a native call in flight; pair with <see cref="ReleaseHandle"/>.</summary>
+        private IntPtr AcquireHandle()
         {
-            if (_handle == IntPtr.Zero) throw new ObjectDisposedException(nameof(OamBridge));
+            lock (_nativeLock)
+            {
+                if (_handle == IntPtr.Zero) throw new ObjectDisposedException(nameof(OamBridge));
+                _nativeCalls++;
+                return _handle;
+            }
+        }
+
+        private void ReleaseHandle()
+        {
+            lock (_nativeLock)
+            {
+                if (--_nativeCalls == 0) Monitor.PulseAll(_nativeLock);
+            }
         }
 
         // ---- tools -------------------------------------------------------------------------
@@ -558,11 +627,21 @@ namespace OpenAppleModels
             if (method != null && message.ContainsKey("id"))
             {
                 if (method == "tool/call") HandleToolCall(message["id"], parameters);
-                else SendMessage(new Dictionary<string, object>
+                else
                 {
-                    ["jsonrpc"] = "2.0", ["id"] = message["id"],
-                    ["error"] = new Dictionary<string, object> { ["code"] = -32601, ["message"] = "Client does not implement " + method },
-                });
+                    try
+                    {
+                        SendMessage(new Dictionary<string, object>
+                        {
+                            ["jsonrpc"] = "2.0", ["id"] = message["id"],
+                            ["error"] = new Dictionary<string, object> { ["code"] = -32601, ["message"] = "Client does not implement " + method },
+                        });
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Disposed meanwhile: nobody is waiting for the answer.
+                    }
+                }
                 return;
             }
             if (method != null)
@@ -590,18 +669,18 @@ namespace OpenAppleModels
             }
 
             if (!message.TryGetValue("id", out var idValue) || !(idValue is string id)) return;
-            TaskCompletionSource<object> completion;
+            Action<object, Exception> complete;
             lock (_lock)
             {
-                if (!_pending.TryGetValue(id, out completion)) return;
+                if (!_pending.TryGetValue(id, out complete)) return;
                 _pending.Remove(id);
                 _eventHandlers.Remove(id);
             }
-            if (message.TryGetValue("error", out var error)) completion.TrySetException(OamException.FromJson(error));
+            if (message.TryGetValue("error", out var error)) complete(null, OamException.FromJson(error));
             else
             {
                 message.TryGetValue("result", out var result);
-                completion.TrySetResult(result);
+                complete(result, null);
             }
         }
 
@@ -649,25 +728,37 @@ namespace OpenAppleModels
 #endif
         }
 
-        /// <summary>Cancels all work and releases the native bridge. No callbacks happen afterwards.</summary>
+        /// <summary>Cancels all work and releases the native bridge. No callbacks happen afterwards. Thread-safe
+        /// and idempotent; it waits for SendMessage/CallBlocking calls on other threads to leave the native code
+        /// (an in-flight CallBlocking is cancelled first, so this is quick).</summary>
         public void Dispose()
         {
-            var handle = _handle;
-            if (handle == IntPtr.Zero) return;
-            _handle = IntPtr.Zero;
+            IntPtr handle;
+            lock (_nativeLock)
+            {
+                handle = _handle;
+                if (handle == IntPtr.Zero) return;  // only the first Dispose gets past this point
+                _handle = IntPtr.Zero;              // later native calls throw ObjectDisposedException
+                if (_nativeCalls > 0)
+                {
+                    // A CallBlocking may be waiting for a slow turn: shutting down cancels it. Non-blocking.
+                    Native.oam_bridge_send(handle, Native.Utf8("{\"jsonrpc\":\"2.0\",\"method\":\"shutdown\"}"));
+                    while (_nativeCalls > 0) Monitor.Wait(_nativeLock);
+                }
+            }
             Native.oam_bridge_destroy(handle);  // waits for an in-flight callback, then never calls back
             if (_self.IsAllocated) _self.Free();
-            List<TaskCompletionSource<object>> pending;
+            List<Action<object, Exception>> pending;
             lock (_lock)
             {
-                pending = new List<TaskCompletionSource<object>>(_pending.Values);
+                pending = new List<Action<object, Exception>>(_pending.Values);
                 _pending.Clear();
                 _eventHandlers.Clear();
                 _worldHandlers.Clear();
                 _openCalls.Clear();
             }
-            foreach (var completion in pending)
-                completion.TrySetException(new OamException(-32023, "The bridge was disposed."));
+            foreach (var complete in pending)
+                complete(null, new OamException(-32023, "The bridge was disposed.", new Dictionary<string, object> { ["code"] = "shut_down" }));
         }
     }
 

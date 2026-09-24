@@ -23,9 +23,13 @@ enum SessionMethods {
             let session = try request.engine.session(request.params.string("session"))
             return .result(["session": .string(session.id), "transcript": try BridgeCoding.json(session.agent.transcript)])
         }
+        // Scheduled operations call `WorkQueue.commit()` right before they
+        // change the session, so a cancelled operation never reports
+        // `cancelled` and then applies anyway.
         registry.register("session/reset") { request in
             let session = try request.engine.session(request.params.string("session"))
             return session.schedule {
+                try WorkQueue.commit()
                 await session.agent.reset()
                 return ["session": .string(session.id)]
             }
@@ -34,6 +38,7 @@ enum SessionMethods {
             let session = try request.engine.session(request.params.string("session"))
             let instructions = try request.params.optionalString("instructions")
             return session.schedule {
+                try WorkQueue.commit()
                 session.agent.instructions = instructions
                 return ["session": .string(session.id)]
             }
@@ -42,6 +47,7 @@ enum SessionMethods {
             let session = try request.engine.session(request.params.string("session"))
             let note = try request.params.optionalString("note")
             return session.schedule {
+                try WorkQueue.commit()
                 session.agent.contextNote = note
                 return ["session": .string(session.id)]
             }
@@ -51,6 +57,7 @@ enum SessionMethods {
             let parsed = try BridgeCoding.tools(from: request.params.value("tools"), defaultTimeout: session.toolTimeout)
             let warnings = parsed.warnings + [toolCountWarning(parsed.tools.count)].compactMap { $0 }
             return session.schedule {
+                try WorkQueue.commit()
                 try session.agent.setTools(parsed.tools)
                 return ["session": .string(session.id), "warnings": .array(warnings.map(JSONValue.string))]
             }
@@ -60,11 +67,45 @@ enum SessionMethods {
             let keep = try request.params.optionalInt("keepRecentTurns", minimum: 0) ?? 2
             let instructions = try request.params.optionalString("summaryInstructions")
             return session.schedule {
-                let summary = try await session.agent.compactHistory(keepingRecentTurns: keep, summaryInstructions: instructions)
+                let summary = try await compact(session.agent, keepingRecentTurns: keep, summaryInstructions: instructions)
                 return ["session": .string(session.id), "summary": summary.map(JSONValue.string) ?? .null]
             }
         }
     }
+
+    // MARK: session/compact
+
+    /// ``Agent/compactHistory(keepingRecentTurns:summaryInstructions:userLabel:assistantLabel:)``,
+    /// but cancellable: the summary is generated in the calling task (so
+    /// cancelling it stops the model call) and the history is only replaced
+    /// if the operation was not cancelled meanwhile. The core method runs on
+    /// the agent's own queue and always finishes, so a cancelled
+    /// `session/compact` would still rewrite the history.
+    ///
+    /// Must run inside the session's queue (``BridgeSession/schedule(_:)``),
+    /// which keeps turns from running while the summary is written.
+    static func compact(_ agent: Agent, keepingRecentTurns keep: Int, summaryInstructions: String?) async throws -> String? {
+        let entries = agent.history
+        let starts = entries.indices.filter { if case .prompt = entries[$0] { true } else { false } }
+        guard starts.count > keep else { return nil }
+        let cut = keep <= 0 ? entries.endIndex : starts[starts.count - keep]
+        var prompt = ""
+        if let previous = agent.contextNote { prompt += "Summary so far:\n\(previous)\n\n" }
+        prompt += "Conversation to fold into the summary:\n\(Agent.render(Array(entries[..<cut])))"
+        let summarizer = LanguageModelSession(model: agent.model, instructions: summaryInstructions ?? defaultSummaryInstructions)
+        let summary = try await summarizer.respond(to: prompt).content
+        try WorkQueue.commit()
+        agent.contextNote = summary
+        await agent.replaceHistory(Array(entries[cut...]))
+        return summary
+    }
+
+    /// Same as the core's default for `compactHistory`.
+    static let defaultSummaryInstructions = """
+        You maintain a running summary of a conversation for a character who must remember it. \
+        Merge the new conversation into the existing summary. Keep names, promises, facts learned, \
+        items exchanged, decisions and the relationship's tone. Write at most 120 words in plain prose.
+        """
 
     // MARK: session/create
 
@@ -147,8 +188,8 @@ enum SessionMethods {
         if let sampling = options["sampling"] {
             configuration.sampling = try BridgeCoding.sampling(sampling, path: "options.sampling")
         }
-        if let seconds = try options.optionalDouble("toolTimeoutSeconds", minimum: 0) {
-            toolTimeout = seconds == 0 ? nil : .milliseconds(Int((seconds * 1000).rounded()))
+        if let seconds = try options.optionalSeconds("toolTimeoutSeconds") {
+            toolTimeout = BridgeCoding.timeout(seconds: seconds)
         }
         if let trim = try options.optionalBool("trimHistory") { configuration.context.trimsHistory = trim }
         if let reserved = try options.optionalInt("reservedResponseTokens", minimum: 0) {
@@ -172,9 +213,6 @@ enum SessionMethods {
         let prompt = try params.string("prompt")
         let stream = try params.optionalBool("stream") ?? false
         let policy = try BridgeCoding.toolPolicy(from: params, base: session.agent.configuration.toolPolicy)
-        if case .tool(let name) = policy.choice, !session.agent.tools.contains(where: { $0.name == name }) {
-            throw BridgeError.invalidParams("'toolChoice' names tool '\(name)', which session '\(session.id)' does not have.")
-        }
         var warnings = unknownKeys(in: params, allowed: respondKeys)
         var schema: JSONSchema?
         if let value = params["schema"] {
@@ -184,6 +222,11 @@ enum SessionMethods {
         }
         let context: JSONObject = ["session": .string(session.id)]
         return session.schedule { [schema, warnings] in
+            // Checked when the turn starts, against the tools in force then
+            // (an earlier pipelined session/setTools may add the tool).
+            if case .tool(let name) = policy.choice, !session.agent.tools.contains(where: { $0.name == name }) {
+                throw BridgeError.invalidParams("'toolChoice' names tool '\(name)', which session '\(session.id)' does not have.")
+            }
             let run = if let schema {
                 session.agent.run(prompt, schema: schema, policy: policy)
             } else {

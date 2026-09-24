@@ -267,8 +267,8 @@ public enum BridgeCoding {
                 try schema(value, path: elementPath + ".parameters")
             } ?? .empty
             var timeout = defaultTimeout
-            if let seconds = try params.optionalDouble("timeoutSeconds", minimum: 0) {
-                timeout = seconds == 0 ? nil : .milliseconds(Int((seconds * 1000).rounded()))
+            if let seconds = try params.optionalSeconds("timeoutSeconds") {
+                timeout = Self.timeout(seconds: seconds)
             }
             let tool: AgentTool
             do {
@@ -280,6 +280,14 @@ public enum BridgeCoding {
             warnings.append(contentsOf: tool.schemaWarnings.map { "\(name): \($0)" })
         }
         return (tools, warnings)
+    }
+
+    /// Seconds → a time limit; `0` means none. Validate the input with
+    /// ``BridgeParams/optionalSeconds(_:)``; out-of-range values are clamped
+    /// here only as a safety net, never trapping.
+    public static func timeout(seconds: Double) -> Duration? {
+        guard seconds > 0 else { return nil }
+        return .milliseconds(Int64((min(seconds, BridgeParams.maxTimeoutSeconds) * 1000).rounded()))
     }
 
     static func isValidToolName(_ name: String) -> Bool {
@@ -331,7 +339,7 @@ public enum BridgeCoding {
         if let name = value.stringValue {
             switch name {
             case "system": return .system
-            case "scripted": return .scripted(ModelScript([]))
+            case "scripted": return .scripted(ModelScript([], recordsRequests: false))
             default: return .custom(type: name, options: ["type": .string(name)])
             }
         }

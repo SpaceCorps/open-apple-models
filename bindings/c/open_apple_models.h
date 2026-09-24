@@ -57,7 +57,16 @@
  *     callback is never called again and the handle is invalid.
  *   - Calling oam_bridge_destroy() from inside the callback is allowed; that
  *     callback invocation is the last one.
- *   - Using a handle after oam_bridge_destroy() is undefined behavior.
+ *   - Using a handle after oam_bridge_destroy() is undefined behavior, and so is
+ *     destroying it while another thread is inside oam_bridge_send() or
+ *     oam_call_blocking() with it. Hosts that call from several threads must
+ *     make destroy wait for those calls (see oam_call_blocking below).
+ *
+ * MINIMUM OS
+ *   - The library links FoundationModels (OS 27) APIs strongly. Apps must set
+ *     their deployment target / minimum OS version to 27.0 (macOS, iOS,
+ *     visionOS); with a lower minimum the app crashes at launch on older OS
+ *     versions instead of degrading.
  */
 
 #ifndef OPEN_APPLE_MODELS_H
@@ -120,9 +129,14 @@ const char *oam_version(void);
  * bridge or request_json is NULL.
  *
  * Notifications (streaming) and tool/call requests caused by the request
- * still go to the callback. Do not use this for sessions with client tools
- * unless another thread answers tool/call requests, and never call it from
- * inside the callback.
+ * still go to the callback, with request_json's "id" as their "requestId"
+ * (give each call a distinct id to tell them apart). Do not use this for
+ * sessions with client tools unless another thread answers tool/call
+ * requests, and never call it from inside the callback.
+ *
+ * Do not call oam_bridge_destroy() while another thread is inside this call:
+ * guard the handle (bindings count calls in flight, send
+ * {"jsonrpc":"2.0","method":"shutdown"} to cancel them, wait, then destroy).
  */
 char *oam_call_blocking(oam_bridge *bridge, const char *request_json, int timeout_ms);
 

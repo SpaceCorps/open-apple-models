@@ -35,10 +35,11 @@ public enum BridgeScript {
         for (index, step) in steps.enumerated() {
             parsed.append(try self.step(step, path: "\(path).steps[\(index)]"))
         }
+        // Bridge sessions are long-lived and nobody reads the request log.
         if let fallback = params["fallback"] {
-            return ModelScript(parsed, fallback: try step(fallback, path: path + ".fallback"))
+            return ModelScript(parsed, fallback: try step(fallback, path: path + ".fallback"), recordsRequests: false)
         }
-        return ModelScript(parsed)
+        return ModelScript(parsed, recordsRequests: false)
     }
 
     /// Parses one step.

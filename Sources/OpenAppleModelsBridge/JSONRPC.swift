@@ -3,14 +3,25 @@ import OpenAppleModels
 
 /// A JSON-RPC request identifier: a string or a number, echoed back exactly
 /// as the peer sent it.
+///
+/// Numbers travel as doubles, which hold integers exactly only up to 2^53 in
+/// magnitude, so larger numeric ids are rejected (``init(_:)`` returns `nil`
+/// and the bridge answers `-32600`) instead of being echoed back altered.
+/// Integral ids are always written as plain digits (see ``JSONRPCMessage``).
 public struct JSONRPCID: Sendable, Hashable, CustomStringConvertible {
     /// The raw id (`.string` or `.number`).
     public let value: JSONValue
 
-    /// Wraps a JSON id; returns `nil` for anything but a string or a number.
+    /// The largest magnitude a numeric id may have: 2^53 - 1.
+    public static let maxExactInteger: Double = 9_007_199_254_740_991
+
+    /// Wraps a JSON id; returns `nil` for anything but a string or a number,
+    /// and for numbers that cannot be echoed exactly (non-finite, or beyond
+    /// ``maxExactInteger`` in magnitude).
     public init?(_ value: JSONValue) {
         switch value {
-        case .string, .number: self.value = value
+        case .string: self.value = value
+        case .number(let number) where number.isFinite && abs(number) <= Self.maxExactInteger: self.value = value
         default: return nil
         }
     }
@@ -18,7 +29,13 @@ public struct JSONRPCID: Sendable, Hashable, CustomStringConvertible {
     public init(_ string: String) { value = .string(string) }
     public init(_ number: Int) { value = .number(Double(number)) }
 
-    public var description: String { value.stringValue ?? value.serialized() }
+    public var description: String { value.stringValue ?? JSONRPCMessage.serialize(value) }
+
+    /// Why `value` is not a valid id, for the `-32600` error message.
+    package static func rejectionReason(_ value: JSONValue) -> String {
+        guard value.doubleValue != nil else { return "'id' must be a string or a number." }
+        return "A numeric 'id' must be an integer of magnitude at most 2^53-1 (9007199254740991) so it can be echoed exactly; use a string id."
+    }
 }
 
 /// A JSON-RPC error object, thrown by method handlers and returned to peers.
@@ -26,7 +43,7 @@ public struct JSONRPCID: Sendable, Hashable, CustomStringConvertible {
 /// Every error carries `data.code`, a stable snake_case string (for
 /// application errors, the ``AgentError/Code`` raw value) so clients can
 /// branch without memorizing numeric codes.
-public struct BridgeError: Error, Sendable, Hashable, CustomStringConvertible {
+public struct BridgeError: Error, LocalizedError, Sendable, Hashable, CustomStringConvertible {
     public var code: Int
     public var message: String
     /// Extra information; always an object containing at least `code`.
@@ -46,6 +63,9 @@ public struct BridgeError: Error, Sendable, Hashable, CustomStringConvertible {
     }
 
     public var description: String { "\(code) \(name ?? "error"): \(message)" }
+
+    /// The message (`LocalizedError`), so `localizedDescription` is readable.
+    public var errorDescription: String? { message }
 
     /// The string code in `data.code`, if any.
     public var name: String? { data?["code"]?.stringValue }
@@ -197,18 +217,53 @@ extension BridgeError {
 /// Builders for single-line JSON-RPC 2.0 messages.
 public enum JSONRPCMessage {
     public static func result(id: JSONRPCID, _ result: JSONValue) -> String {
-        JSONValue.object(["jsonrpc": "2.0", "id": id.value, "result": result]).serialized()
+        serialize(["jsonrpc": "2.0", "id": id.value, "result": result])
     }
 
     public static func error(id: JSONRPCID?, _ error: BridgeError) -> String {
-        JSONValue.object(["jsonrpc": "2.0", "id": id?.value ?? .null, "error": error.json]).serialized()
+        serialize(["jsonrpc": "2.0", "id": id?.value ?? .null, "error": error.json])
     }
 
     public static func notification(method: String, params: JSONValue) -> String {
-        JSONValue.object(["jsonrpc": "2.0", "method": .string(method), "params": params]).serialized()
+        serialize(["jsonrpc": "2.0", "method": .string(method), "params": params])
     }
 
     public static func request(id: JSONRPCID, method: String, params: JSONValue) -> String {
-        JSONValue.object(["jsonrpc": "2.0", "id": id.value, "method": .string(method), "params": params]).serialized()
+        serialize(["jsonrpc": "2.0", "id": id.value, "method": .string(method), "params": params])
+    }
+
+    /// Compact JSON for the wire. Like ``JSONValue/serialized(_:)``, except
+    /// that every integer up to 2^53 in magnitude is written as plain digits
+    /// (the general serializer uses exponent notation from 10^15), so numeric
+    /// request ids — also inside `requestId` — reach the peer exactly.
+    public static func serialize(_ value: JSONValue) -> String {
+        var output = ""
+        write(value, to: &output)
+        return output
+    }
+
+    private static func write(_ value: JSONValue, to output: inout String) {
+        switch value {
+        case .number(let number) where number.rounded() == number && abs(number) <= JSONRPCID.maxExactInteger:
+            output += String(Int64(number))
+        case .array(let elements):
+            output += "["
+            for (offset, element) in elements.enumerated() {
+                if offset > 0 { output += "," }
+                write(element, to: &output)
+            }
+            output += "]"
+        case .object(let object):
+            output += "{"
+            for (offset, key) in object.keys.enumerated() {
+                if offset > 0 { output += "," }
+                output += JSONValue.string(key).serialized()
+                output += ":"
+                write(object[key] ?? .null, to: &output)
+            }
+            output += "}"
+        default:
+            output += value.serialized()
+        }
     }
 }

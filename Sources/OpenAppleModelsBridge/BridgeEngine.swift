@@ -62,7 +62,7 @@ public final class BridgeEngine: Sendable {
     enum Sink: Sendable {
         /// Reply through `send`.
         case peer
-        /// Reply to an in-process ``call(_:_:)``.
+        /// Reply to an in-process ``call(_:_:id:)``.
         case local(LocalCall)
     }
 
@@ -130,8 +130,8 @@ public final class BridgeEngine: Sendable {
             outbox.send(JSONRPCMessage.error(id: id, .invalidRequest("Missing or unsupported 'jsonrpc' version; expected \"2.0\".")))
             return
         }
-        if rawID != nil, id == nil {
-            outbox.send(JSONRPCMessage.error(id: nil, .invalidRequest("'id' must be a string or a number.")))
+        if let rawID, id == nil {
+            outbox.send(JSONRPCMessage.error(id: nil, .invalidRequest(JSONRPCID.rejectionReason(rawID))))
             return
         }
         if let methodValue = object["method"] {
@@ -158,9 +158,13 @@ public final class BridgeEngine: Sendable {
     /// sent the request. Notifications and `tool/call` requests the method
     /// causes still go through `send` (answer those with ``receive(_:)``).
     /// Cancelling the calling task cancels the request.
-    public func call(_ method: String, _ params: JSONValue? = nil) async throws(BridgeError) -> JSONValue {
+    ///
+    /// - Parameter id: The request id those notifications and `tool/call`
+    ///   requests carry as `requestId`, so the caller can route them. When
+    ///   `nil`, a private `local-<n>` id is used.
+    public func call(_ method: String, _ params: JSONValue? = nil, id callerID: JSONRPCID? = nil) async throws(BridgeError) -> JSONValue {
         let local = LocalCall()
-        let id = state.withLock { state in
+        let id = callerID ?? state.withLock { state in
             defer { state.nextLocalCall += 1 }
             return JSONRPCID("local-\(state.nextLocalCall)")
         }
@@ -380,23 +384,43 @@ public final class BridgeEngine: Sendable {
     /// Whether `shutdown` (or ``close()``) has run.
     public var isShutDown: Bool { state.withLock { $0.phase != .running } }
 
+    /// How long ``shutdown()`` waits for extensions and cancelled requests.
+    static let shutdownGracePeriod: Duration = .seconds(2)
+
     /// Cancels all turns, fails pending `tool/call` requests, removes all
     /// sessions and shuts down extensions. Later requests fail with
-    /// `shut_down`. Waits briefly for cancelled requests to send their
-    /// error responses.
+    /// `shut_down`. Waits at most about two seconds for extensions to shut
+    /// down and for cancelled requests to send their error responses; work
+    /// that ignores cancellation is left to finish in the background.
     public func shutdown() async {
         guard let work = takeEverything(nextPhase: .shutDown) else { return }
         for session in work.sessions { session.cancelAll() }
         for request in work.requests { request.complete(.failure(.shutDown)) }
         for task in work.tasks { task.cancel() }
-        for bridgeExtension in configuration.extensions { await bridgeExtension.shutdown() }
+        let extensions = configuration.extensions
         let tasks = work.tasks
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { for task in tasks { await task.value } }
-            group.addTask { try? await Task.sleep(for: .seconds(2)) }
-            await group.next()
-            group.cancelAll()
+        await Self.run(for: Self.shutdownGracePeriod) {
+            for bridgeExtension in extensions { await bridgeExtension.shutdown() }
+            for task in tasks { await task.value }
         }
+    }
+
+    /// Runs `work` in a new task and returns when it finishes or `limit`
+    /// has passed, whichever comes first. Nothing here awaits the work
+    /// structurally, so the bound holds even when the work cannot be
+    /// cancelled (`Task.value` never is).
+    static func run(for limit: Duration, _ work: @escaping @Sendable () async -> Void) async {
+        let finished = OneShot<Void>()
+        Task {
+            await work()
+            finished.resolve(())
+        }
+        let timer = Task {
+            try? await Task.sleep(for: limit)
+            finished.resolve(())
+        }
+        await finished.value()
+        timer.cancel()
     }
 
     /// Shuts down immediately without waiting, and stops delivering
@@ -503,7 +527,7 @@ public final class ClientRequest: Sendable {
     }
 }
 
-/// The reply slot of an in-process ``BridgeEngine/call(_:_:)``.
+/// The reply slot of an in-process ``BridgeEngine/call(_:_:id:)``.
 final class LocalCall: Sendable {
     private let outcome = OneShot<Result<JSONValue, BridgeError>>()
     private let work = Mutex<(task: Task<Void, Never>?, cancelled: Bool)>((nil, false))
