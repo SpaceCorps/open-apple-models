@@ -232,7 +232,16 @@ enum SessionMethods {
             } else {
                 session.agent.run(prompt, policy: policy)
             }
-            let response = try await request.drive(run, stream: stream, context: context)
+            let response: AgentResponse
+            do {
+                response = try await request.drive(run, stream: stream, context: context)
+            } catch {
+                // Report a failed or cancelled turn only once the agent has
+                // rolled it back, so the client never observes partial state.
+                run.cancel()
+                await session.agent.waitUntilIdle()
+                throw error
+            }
             var result: JSONObject = ["session": .string(session.id)]
             for (key, value) in BridgeCoding.json(response) { result[key] = value }
             if !warnings.isEmpty { result["warnings"] = .array(warnings.map(JSONValue.string)) }

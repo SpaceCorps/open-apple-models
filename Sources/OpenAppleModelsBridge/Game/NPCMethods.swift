@@ -186,7 +186,16 @@ enum NPCMethods {
             context: ["npc": .string(entry.id)], stream: stream)
         return entry.queue.schedule {
             let dialogue = entry.npc.talkStream(line, context: context, toolChoice: toolChoice)
-            let turn = try await driver.drive(dialogue)
+            let turn: DialogueTurn
+            do {
+                turn = try await driver.drive(dialogue)
+            } catch {
+                // Report a failed or cancelled turn only once the NPC has
+                // rolled it back, so the client never observes partial state.
+                dialogue.cancel()
+                await entry.npc.waitUntilIdle()
+                throw error
+            }
             var result: JSONObject = ["npc": .string(entry.id)]
             for (key, value) in GameCoding.json(turn) { result[key] = value }
             if !warnings.isEmpty { result["warnings"] = .array(warnings.map(JSONValue.string)) }

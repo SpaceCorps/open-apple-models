@@ -356,6 +356,13 @@ public final class Agent: Sendable {
         }
     }
 
+    /// Waits until every queued or running turn has finished, including a
+    /// cancelled turn that is still rolling back its partial work. Use it
+    /// before reading ``history`` or ``transcript`` after a cancellation.
+    public func waitUntilIdle() async {
+        await queue.enqueue {}.value
+    }
+
     /// Loads model resources ahead of the first turn to cut latency.
     public func prewarm(promptPrefix: String? = nil) {
         let session = state.withLock { $0.session }
