@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (macOS + iOS) and test
+    # GitHub's Xcode 27 image (preview). FoundationModels' macOS/iOS 27 APIs
+    # need the Xcode 27 SDK to compile.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 27
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+          swift --version
+          sw_vers
+
+      - name: Build all products (macOS)
+        run: swift build
+
+      - name: Build libraries for iOS
+        run: |
+          for scheme in OpenAppleModels OpenAppleModelsGame OpenAppleModelsServer OpenAppleModelsBridge; do
+            echo "::group::$scheme"
+            xcodebuild build -quiet -scheme "$scheme" -destination 'generic/platform=iOS' \
+              CODE_SIGNING_ALLOWED=NO
+            echo "::endgroup::"
+          done
+
+      - name: Test (scripted model — no Apple Intelligence required)
+        run: |
+          major=$(sw_vers -productVersion | cut -d. -f1)
+          if [ "$major" -ge 27 ]; then
+            swift test
+          else
+            echo "Runner is macOS $(sw_vers -productVersion); FoundationModels 27 APIs need a macOS 27 host to run tests. Skipping."
+          fi
