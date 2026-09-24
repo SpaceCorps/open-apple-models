@@ -7,7 +7,10 @@ import Testing
 
 /// Listener recovery, resource limits, early request screening, Host
 /// validation and log hygiene.
-@Suite struct HardeningTests {
+/// Serialized: `RawClient` does blocking socket reads on concurrency
+/// threads; running these in parallel can starve the pool the server needs
+/// on machines with few cores (e.g. CI runners).
+@Suite(.serialized) struct HardeningTests {
     static let chatBody = #"{"messages": [{"role": "user", "content": "Hi"}]}"#
 
     // MARK: Listener failures

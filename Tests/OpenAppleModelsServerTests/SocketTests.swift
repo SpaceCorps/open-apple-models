@@ -5,7 +5,10 @@ import OpenAppleModelsTesting
 import Testing
 
 /// End-to-end tests over real sockets (URLSession and raw POSIX clients).
-@Suite struct SocketTests {
+/// Serialized: `RawClient` does blocking socket reads on concurrency
+/// threads; running these in parallel can starve the pool the server needs
+/// on machines with few cores (e.g. CI runners).
+@Suite(.serialized) struct SocketTests {
     static let session = URLSession(configuration: .ephemeral)
 
     static func post(_ port: Int, _ body: String, headers: [String: String] = [:]) async throws -> (status: Int, headers: [AnyHashable: Any], body: String) {
