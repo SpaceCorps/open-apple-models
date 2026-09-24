@@ -26,7 +26,7 @@ let package = Package(
         .target(name: "OpenAppleModels"),
         .target(name: "OpenAppleModelsGame", dependencies: ["OpenAppleModels"]),
         .target(name: "OpenAppleModelsServer", dependencies: ["OpenAppleModels"]),
-        .target(name: "OpenAppleModelsBridge", dependencies: ["OpenAppleModels", "OpenAppleModelsGame"]),
+        .target(name: "OpenAppleModelsBridge", dependencies: ["OpenAppleModels", "OpenAppleModelsGame", "OpenAppleModelsTesting"]),
         .target(name: "OpenAppleModelsFFI", dependencies: ["OpenAppleModelsBridge"]),
         .target(name: "OpenAppleModelsTesting", dependencies: ["OpenAppleModels"]),
         .executableTarget(

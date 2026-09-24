@@ -16,7 +16,8 @@ public struct SchemaConversionError: Error, Sendable, CustomStringConvertible {
 /// - `object` → properties in document order; properties missing from
 ///   `required`, or nullable, become optional.
 /// - `string` + `enum` → `anyOf` string choices (the model can only emit listed values).
-/// - `string` + `const` → constant guide; `pattern` → regex guide.
+/// - `string` + `const` → constant guide; `pattern` is described (the
+///   on-device model rejects most regex guides).
 /// - `integer`/`number` + `minimum`/`maximum` → range guides.
 /// - `array` + `items`/`minItems`/`maxItems` → element-count guides.
 /// - `anyOf`/`oneOf` → a union the model picks one branch of; `null` branches mark the value optional.
@@ -189,17 +190,13 @@ public struct SchemaConverter {
     }
 
     private mutating func buildString(_ schema: JSONObject, path: String) throws(SchemaConversionError) -> Built {
-        let description = describe(schema, base: schema["description"]?.stringValue, path: path,
+        var description = describe(schema, base: schema["description"]?.stringValue, path: path,
                                    ignoring: ["format", "minLength", "maxLength", "contentEncoding", "contentMediaType"])
         if let pattern = schema["pattern"]?.stringValue {
-            do {
-                let regex = try Regex(pattern)
-                return Built(schema: DynamicGenerationSchema(type: String.self, guides: [.pattern(regex)]), description: description)
-            } catch {
-                warn(path, "pattern '\(pattern)' is not a valid Swift regex; described instead")
-                return Built(schema: DynamicGenerationSchema(type: String.self),
-                             description: join(description, "Must match the pattern \(pattern)."))
-            }
+            // The on-device model rejects most regex guides ("unsupported
+            // generation guide"), so patterns are described, not enforced.
+            warn(path, "pattern '\(pattern)' is described to the model but not enforced")
+            description = join(description, "Must match the regular expression \(pattern).")
         }
         return Built(schema: DynamicGenerationSchema(type: String.self), description: description)
     }
