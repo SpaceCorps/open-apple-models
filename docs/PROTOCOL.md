@@ -179,7 +179,7 @@ Creates an agent with its own conversation.
 
 | Option | Type | Default | |
 |---|---|---|---|
-| `toolChoice` | `"auto"`/`"none"`/`"required"`/`{"tool": name}` | `"auto"` | default for each turn. `required` / `{"tool"}` force a tool call on the **first model step only**, then the model answers freely |
+| `toolChoice` | `"auto"`/`"none"`/`"required"`/`"explicit"`/`{"tool": name}` | `"auto"` | default for each turn. `required` / `{"tool"}` force a tool call on the **first model step only**, then the model answers freely; `explicit` makes the first step call a tool or a built-in `respond_directly` tool |
 | `maxToolRounds` | int ≥ 0 | 4 | model steps that may call tools; afterwards tools are disabled so the model must answer |
 | `maxToolCalls` | int ≥ 0 | 12 | tool calls per turn; extra calls get an error output |
 | `enabledTools` | [string] | all | restrict the tools visible to the model |
@@ -368,7 +368,7 @@ Emotions: `neutral`, `happy`, `sad`, `angry`, `afraid`, `surprised`, `suspicious
 |---|---|---|
 | `replyFormat` | `"automatic"` | `"automatic"`, `"structured"` or `"text"` — see the trade-off below |
 | `groundingTool` | none | a tool the NPC must call first on every turn (e.g. `"check_inventory"`, `"read_world_state"`). The small model often skips tools and invents facts in `auto` mode; this forces the lookup on the first step only |
-| `toolChoice` | `"auto"` | `"auto"`/`"none"`/`"required"`/`{"tool": name}`, used when `groundingTool` is not set |
+| `toolChoice` | `"explicit"` | `"auto"`/`"none"`/`"required"`/`"explicit"`/`{"tool": name}`, used when `groundingTool` is not set. `explicit`: the first step calls a tool or a built-in `respond_directly` tool |
 | `maxToolRounds`, `maxToolCalls` | 2, 6 | per turn |
 | `toolTimeoutSeconds` | 120 | time the engine has to answer a `tool/call` (`0` = forever, at most 86400); a tool's own `timeoutSeconds` wins |
 | `worldReadable` | `[""]` | world paths `read_world_state` may read (`""` = everything, `[]` = no read tool) |
