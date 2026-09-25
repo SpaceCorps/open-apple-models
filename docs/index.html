@@ -15,7 +15,7 @@
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://spacecorps.github.io/open-apple-models/">
   <meta property="og:title" content="OpenAppleModels | Real Tool Calling for Apple Foundation Models">
-  <meta property="og:description" content="Unlocking deterministic tool calling, autonomous agent loops, NPC dialogue, and OpenAI-compatible local server on Apple's on-device Foundation Models.">
+  <meta property="og:description" content="Per-step tool calling, agent loops, NPC dialogue and an OpenAI-compatible local server for Apple's on-device Foundation Models. MIT, pre-release.">
   <meta property="og:image" content="https://spacecorps.github.io/open-apple-models/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -27,7 +27,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:url" content="https://spacecorps.github.io/open-apple-models/">
   <meta name="twitter:title" content="OpenAppleModels | Real Tool Calling for Apple Foundation Models">
-  <meta name="twitter:description" content="Unlocking deterministic tool calling, autonomous agent loops, NPC dialogue, and OpenAI-compatible local server on Apple's on-device Foundation Models.">
+  <meta name="twitter:description" content="Per-step tool calling, agent loops, NPC dialogue and an OpenAI-compatible local server for Apple's on-device Foundation Models. MIT, pre-release.">
   <meta name="twitter:image" content="https://spacecorps.github.io/open-apple-models/og-image.png">
 
   <!-- AI Agents & Discovery -->
@@ -54,8 +54,8 @@
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "iOS 27+, iPadOS 27+, macOS 27+, visionOS 27+",
         "url": "https://spacecorps.github.io/open-apple-models/",
-        "description": "Developer runtime and agent framework unlocking real tool calling, game NPC dialogue, and OpenAI-compatible serving for Apple on-device Foundation Models.",
-        "softwareVersion": "1.0.0",
+        "description": "Swift package for real tool calling, agent loops, game NPC dialogue and decisions, and an OpenAI-compatible local server on Apple's on-device Foundation Models. Pre-release.",
+        "softwareVersion": "0.1.0",
         "downloadUrl": "https://github.com/SpaceCorps/open-apple-models",
         "license": "https://opensource.org/licenses/MIT",
         "offers": {
@@ -577,14 +577,14 @@
   <section class="hero">
     <div class="container">
       <div class="pill-announcement">
-        <span>Verified</span> Solves Apple fm serve 0/54 tool call bug &amp; native looping
+        <span>Measured</span> Apple&#39;s fm serve returned 0 tool calls in 54 requests
       </div>
       <h1>
         Real Tool Calling &amp; Agent Loops for<br>
         <span class="gradient-text">Apple Foundation Models</span>
       </h1>
       <p>
-        The open-source Swift developer runtime that brings deterministic tool calling, autonomous agent loops, episodic NPC memory, and an OpenAI-compatible local server to Apple Intelligence across iOS, iPadOS, macOS, and visionOS 27.
+        An MIT-licensed Swift package that brings per-step tool calling, agent loops, NPC dialogue with memory, and an OpenAI-compatible local server to Apple's on-device Foundation Models on iOS, iPadOS, macOS and visionOS 27. Pre-release: no tagged releases yet, and all measurements so far come from macOS 27.
       </p>
 
       <div class="hero-actions">
@@ -618,12 +618,12 @@
           <div class="metric-lbl">On-Device Privacy</div>
         </div>
         <div class="metric-item">
-          <div class="metric-val purple">245+</div>
-          <div class="metric-lbl">Automated Unit Tests</div>
+          <div class="metric-val purple">333</div>
+          <div class="metric-lbl">Swift Tests</div>
         </div>
         <div class="metric-item">
           <div class="metric-val">10/10</div>
-          <div class="metric-lbl">Enum Decision Accuracy</div>
+          <div class="metric-lbl">Valid Enum Decisions (macOS 27)</div>
         </div>
       </div>
     </div>
@@ -636,7 +636,7 @@
         <div class="section-tag">Empirical Research &amp; Probing</div>
         <h2 class="section-title">The Probing Benchmark</h2>
         <p class="section-subtitle">
-          In systematic testing on macOS 27, Apple's native <code>fm serve</code> failed 100% of tool-calling attempts. OpenAppleModels was engineered specifically to fix these architectural bottlenecks.
+          Measured on macOS 27 before building anything: Apple's <code>fm serve</code> returned 0 tool calls in 54 requests, and the framework's own <code>.required</code> mode never stopped calling tools. Details in <a href="RESEARCH.md">RESEARCH.md</a>.
         </p>
       </div>
 
@@ -644,7 +644,7 @@
         <div class="probing-header">
           <h3>Native Apple FoundationModels vs. OpenAppleModels</h3>
           <span class="logo-badge" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">
-            macOS 27 NPU Benchmark
+            Measured on macOS 27
           </span>
         </div>
         <table class="probing-table">
@@ -659,37 +659,37 @@
             <tr>
               <td><strong>Tool Calls Emitted (Tool Mode)</strong></td>
               <td><span class="status-bad">✕ 0 / 54 Emitted (Always answered directly)</span></td>
-              <td><span class="status-good">✓ 54 / 54 Emitted Deterministically</span></td>
+              <td><span class="status-good">✓ Real <code>tool_calls</code> from <code>oam serve</code> and the Swift API</span></td>
             </tr>
             <tr>
               <td><strong>Enforcing <code>tool_choice: "required"</code></strong></td>
               <td><span class="status-bad">✕ HTTP 500 Internal Server Error</span></td>
-              <td><span class="status-good">✓ Guaranteed Step-1 Tool Execution</span></td>
+              <td><span class="status-good">✓ Forced on the first step, then the model answers</span></td>
             </tr>
             <tr>
               <td><strong>Multi-Turn Loop Behavior</strong></td>
-              <td><span class="status-bad">✕ Infinite Tool Calling Loop (Never exits)</span></td>
-              <td><span class="status-good">✓ Bounded Multi-Step Loop Control</span></td>
+              <td><span class="status-bad">✕ <code>.required</code> loops (40+ calls, 3 of 3 runs)</span></td>
+              <td><span class="status-good">✓ Round, call and per-step tool limits</span></td>
             </tr>
             <tr>
               <td><strong>Direct Response Fallback</strong></td>
-              <td><span class="status-bad">✕ Forced tools execute unnecessary lookups</span></td>
-              <td><span class="status-good">✓ <code>.explicit</code> invisible respond_directly</span></td>
+              <td><span class="status-bad">✕ <code>.allowed</code> often skips tools and invents facts</span></td>
+              <td><span class="status-good">✓ <code>.explicit</code>: a tool or <code>respond_directly</code></span></td>
             </tr>
             <tr>
-              <td><strong>Game Engine Bridging (Unity/Godot/Unreal)</strong></td>
+              <td><strong>Game Engine Bridging</strong></td>
               <td><span class="status-bad">✕ Not Provided (Swift framework only)</span></td>
-              <td><span class="status-good">✓ JSON-RPC 2.0 (stdio) &amp; C ABI (FFI)</span></td>
+              <td><span class="status-good">✓ JSON-RPC 2.0 over stdio or a C ABI (C, Python, Unity bindings)</span></td>
             </tr>
             <tr>
-              <td><strong>NPC Persona &amp; Episodic Memory</strong></td>
+              <td><strong>NPC Personas &amp; Memory</strong></td>
               <td><span class="status-bad">✕ No High-Level Dialogue Primitive</span></td>
-              <td><span class="status-good">✓ Personas, Secrets, &amp; Fact Extraction</span></td>
+              <td><span class="status-good">✓ Personas, facts, relationship score, secrets</span></td>
             </tr>
             <tr>
               <td><strong>CI/CD Mock Testing</strong></td>
-              <td><span class="status-bad">✕ Requires live Apple Intelligence Hardware</span></td>
-              <td><span class="status-good">✓ <code>ScriptedLanguageModel</code> Offline CI Mock</span></td>
+              <td><span class="status-bad">✕ Not included</span></td>
+              <td><span class="status-good">✓ <code>ScriptedLanguageModel</code> (tests still need a macOS 27 host)</span></td>
             </tr>
           </tbody>
         </table>
@@ -702,9 +702,9 @@
     <div class="container">
       <div class="section-header">
         <div class="section-tag">Runtime Architecture</div>
-        <h2 class="section-title">Engineered for Production AI Agents</h2>
+        <h2 class="section-title">What Is in the Package</h2>
         <p class="section-subtitle">
-          Six battle-tested packages designed to give game developers, mobile engineers, and autonomous agents full control over local foundation models.
+          Six library products and the <code>oam</code> CLI, for game developers who want on-device NPCs and AI decisions, and for anyone who needs real tool calls from Apple's model.
         </p>
       </div>
 
@@ -721,9 +721,9 @@
         <!-- 2 -->
         <div class="feature-card">
           <div class="feature-icon">🛡️</div>
-          <h3>Explicit Mode (`.explicit`)</h3>
+          <h3>Explicit Mode (<code>.explicit</code>)</h3>
           <p>
-            Eliminates hallucinated or unnecessary lookups by injecting an invisible <code>respond_directly</code> tool. The model only calls game tools when real lookups are strictly necessary.
+            The model must call a tool or a built-in <code>respond_directly</code> tool, which grounds lookups without forcing a pointless call on small talk. On eight tavern lines it chose the right action 8/8, against 7/8 for <code>.auto</code>.
           </p>
         </div>
 
@@ -732,7 +732,7 @@
           <div class="feature-icon">⚔️</div>
           <h3>Game NPC Engine</h3>
           <p>
-            <code>OpenAppleModelsGame</code> provides dynamic NPC personas with relationship tracking (-100 to +100), private secret thresholds, world state subscriptions, and auto-guardrail retries.
+            <code>OpenAppleModelsGame</code> provides NPC personas with memory (facts, a relationship score from -100 to 100, a summary), secrets that unlock with the relationship, world state, decisions and content generation. A blocked reply is retried once as plain text, then replaced by a fallback line.
           </p>
         </div>
 
@@ -741,25 +741,25 @@
           <div class="feature-icon">🌐</div>
           <h3>OpenAI-Compatible Server</h3>
           <p>
-            Drop-in replacement for OpenAI endpoints on <code>http://localhost:8080/v1</code>. Supports full Server-Sent Events (SSE) streaming with genuine <code>tool_calls</code> chunks.
+            A replacement for <code>fm serve</code> on <code>http://127.0.0.1:1976/v1</code> (model <code>"system"</code>) whose <code>tool_calls</code> work, with <code>tool_choice</code>, streaming and <code>json_schema</code> responses.
           </p>
         </div>
 
         <!-- 5 -->
         <div class="feature-card">
           <div class="feature-icon">🎮</div>
-          <h3>Unity, Godot &amp; Unreal Bridge</h3>
+          <h3>Game Engine Bridge</h3>
           <p>
-            Connect any game engine or external runtime over JSON-RPC 2.0 (stdio) or zero-overhead C ABI (<code>OpenAppleModelsFFI</code>) with asynchronous host tool execution.
+            JSON-RPC 2.0 protocol v1.0 over <code>oam stdio</code> or the C ABI (<code>OpenAppleModelsFFI</code>), with tools executed by the host. Bindings for C, Python and Unity; integration notes for Godot and Unreal.
           </p>
         </div>
 
         <!-- 6 -->
         <div class="feature-card">
           <div class="feature-icon">🔒</div>
-          <h3>100% Private &amp; Zero Cost</h3>
+          <h3>On-Device, No API Key</h3>
           <p>
-            All computation runs entirely on the Apple Neural Engine (ANE) and GPU. Zero external network telemetry, zero data exfiltration, and $0.00 cloud API costs forever.
+            By default everything runs on the device's own model, with no API key or cloud service, and the package sends no telemetry. Use of the model is subject to Apple's acceptable use requirements.
           </p>
         </div>
       </div>
@@ -773,7 +773,7 @@
         <div class="section-tag">Developer Quickstart</div>
         <h2 class="section-title">Simple, Declarative Code</h2>
         <p class="section-subtitle">
-          Whether you're developing in native Swift, building games in Unity/Godot, or querying from Python, OpenAppleModels provides an intuitive interface.
+          Swift, the <code>oam</code> CLI, any OpenAI client, or a game engine over JSON-RPC. These examples are taken from the README, where they compile against the current code.
         </p>
       </div>
 
@@ -788,129 +788,101 @@
 
         <!-- Tab 1: Swift Agent -->
         <div id="tab-swift-agent" class="code-content active">
-<pre><code class="language-swift"><span style="color: #6366f1;">import</span> OpenAppleModels
+<pre><code class="language-swift">import OpenAppleModels
 
-<span style="color: #64748b;">// 1. Define a strongly-typed tool with dynamic JSON Schema</span>
-<span style="color: #6366f1;">let</span> lookupInventory = <span style="color: #6366f1;">try</span> AgentTool(
-    name: <span style="color: #a5b4fc;">"lookup_inventory"</span>,
-    description: <span style="color: #a5b4fc;">"Look up quantities of items in the player's pack"</span>,
-    parameters: .object([<span style="color: #a5b4fc;">"item_name"</span>: .string()])
-) { call <span style="color: #6366f1;">in</span>
-    <span style="color: #6366f1;">let</span> item = <span style="color: #6366f1;">try</span> call.string(<span style="color: #a5b4fc;">"item_name"</span>)
-    <span style="color: #6366f1;">return</span> .json([<span style="color: #a5b4fc;">"item"</span>: .string(item), <span style="color: #a5b4fc;">"count"</span>: .number(3), <span style="color: #a5b4fc;">"rarity"</span>: .string(<span style="color: #a5b4fc;">"rare"</span>)])
+let inventory = try AgentTool(
+    name: "check_inventory",
+    description: "Look up how many of an item the blacksmith has and its price in gold.",
+    parameters: .object(["item": .string(description: "Item name")])
+) { call in
+    let item = try call.string("item")
+    return .json(["item": .string(item), "stock": 3, "price_gold": 45])
 }
 
-<span style="color: #64748b;">// 2. Initialize Agent with instructions and tools</span>
-<span style="color: #6366f1;">let</span> agent = <span style="color: #6366f1;">try</span> Agent(
-    instructions: <span style="color: #a5b4fc;">"You are a helpful game assistant. Always verify inventory before confirming."</span>,
-    tools: [lookupInventory]
-)
+let gorm = try Agent(
+    instructions: "You are Gorm, a grumpy blacksmith in a fantasy game. Reply in at most two sentences.",
+    tools: [inventory])
 
-<span style="color: #64748b;">// 3. Grounded query with deterministic tool policy</span>
-<span style="color: #6366f1;">let</span> response = <span style="color: #6366f1;">try</span> <span style="color: #6366f1;">await</span> agent.respond(
-    to: <span style="color: #a5b4fc;">"Do I have any health potions?"</span>,
-    policy: ToolPolicy(choice: .required) <span style="color: #64748b;">// Forces tool on step 1, text on step 2</span>
-)
-
-print(response.text)
-<span style="color: #64748b;">// Output: "Yes, you currently have 3 rare health potions in your pack."</span></code></pre>
+<span style="color: #64748b;">// .required: the model must call a tool on the first step, then answers from its output.</span>
+let reply = try await gorm.respond(to: "Got any iron swords? How much?",
+                                   policy: ToolPolicy(choice: .required))
+print(reply.text, reply.toolCalls.count)</code></pre>
         </div>
 
         <!-- Tab 2: Game NPC -->
         <div id="tab-game-npc" class="code-content">
-<pre><code class="language-swift"><span style="color: #6366f1;">import</span> OpenAppleModelsGame
+<pre><code class="language-swift">import OpenAppleModelsGame
 
-<span style="color: #64748b;">// 1. Create a rich NPC Persona with background and mood</span>
-<span style="color: #6366f1;">let</span> persona = Persona(
-    name: <span style="color: #a5b4fc;">"Gorm"</span>,
-    archetype: <span style="color: #a5b4fc;">"Grumpy Dwarven Blacksmith"</span>,
-    tone: <span style="color: #a5b4fc;">"gruff, impatient, but honorable"</span>,
-    secrets: [
-        Secret(topic: <span style="color: #a5b4fc;">"stolen_anvil"</span>, revealThreshold: 75,
-               description: <span style="color: #a5b4fc;">"Knows the bandit chief stole the clan's ancestral anvil"</span>)
-    ]
-)
+let world = WorldState(["player": ["name": "Aria", "gold": 60], "time_of_day": "evening"])
 
-<span style="color: #64748b;">// 2. Bind NPC to the game world with episodic memory and relationship tracking</span>
-<span style="color: #6366f1;">let</span> npc = <span style="color: #6366f1;">try</span> NPC(
-    persona: persona,
-    tools: [forgeTool, inventoryTool],
-    world: worldState,
-    options: NPCOptions(relationship: 20, memoryTools: .rememberFact)
-)
+let smith = try NPC(
+    persona: Persona(
+        name: "Gorm", role: "the village blacksmith",
+        personality: "Gruff and proud, but fair", speakingStyle: "Short, blunt sentences. Calls people 'lad'."),
+    tools: [inventory],                                     <span style="color: #64748b;">// any AgentTool, local or external</span>
+    world: world,                                           <span style="color: #64748b;">// adds a read_world_state tool</span>
+    options: NPCOptions(
+        groundingTool: "check_inventory",                   <span style="color: #64748b;">// look up stock on every turn</span>
+        worldContextPaths: ["player.name", "player.gold", "time_of_day"]))
 
-<span style="color: #64748b;">// 3. Multi-turn dialogue with automatic world state sync</span>
-<span style="color: #6366f1;">let</span> turn = <span style="color: #6366f1;">try</span> <span style="color: #6366f1;">await</span> npc.talk(<span style="color: #a5b4fc;">"Can you repair this battleaxe?"</span>)
-print(<span style="color: #a5b4fc;">"\(turn.speaker): \(turn.line)"</span>)
-<span style="color: #64748b;">// Gorm: "Bah! Edge is completely chipped. Cost you 15 copper and an hour's wait."</span></code></pre>
+let turn = try await smith.talk("Evening! Got any iron swords? How much?")
+print(turn.emotion, turn.line, turn.playerOptions)
+<span style="color: #64748b;">// Live run of a similar setup (docs/GAMES.md): called check_inventory, then</span>
+<span style="color: #64748b;">// "Aria, I've got three iron swords for 45 gold. Take one if you're keen." in 4.4-5.2 s.</span></code></pre>
         </div>
 
         <!-- Tab 3: OpenAI Server (Python) -->
         <div id="tab-openai-py" class="code-content">
-<pre><code class="language-python"><span style="color: #64748b;"># Run server: oam serve --port 8080</span>
-<span style="color: #6366f1;">from</span> openai <span style="color: #6366f1;">import</span> OpenAI
+<pre><code class="language-python"><span style="color: #64748b;"># Start the server first: oam serve   (127.0.0.1:1976)</span>
+from openai import OpenAI
 
-client = OpenAI(base_url=<span style="color: #a5b4fc;">"http://localhost:8080/v1"</span>, api_key=<span style="color: #a5b4fc;">"none"</span>)
+client = OpenAI(base_url="http://127.0.0.1:1976/v1", api_key="unused")
 
 tools = [{
-    <span style="color: #a5b4fc;">"type"</span>: <span style="color: #a5b4fc;">"function"</span>,
-    <span style="color: #a5b4fc;">"function"</span>: {
-        <span style="color: #a5b4fc;">"name"</span>: <span style="color: #a5b4fc;">"get_player_health"</span>,
-        <span style="color: #a5b4fc;">"description"</span>: <span style="color: #a5b4fc;">"Check the current HP of the player"</span>,
-        <span style="color: #a5b4fc;">"parameters"</span>: {<span style="color: #a5b4fc;">"type"</span>: <span style="color: #a5b4fc;">"object"</span>, <span style="color: #a5b4fc;">"properties"</span>: {}}
-    }
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    },
 }]
 
 response = client.chat.completions.create(
-    model=<span style="color: #a5b4fc;">"apple-foundation-2024"</span>,
-    messages=[{<span style="color: #a5b4fc;">"role"</span>: <span style="color: #a5b4fc;">"user"</span>, <span style="color: #a5b4fc;">"content"</span>: <span style="color: #a5b4fc;">"Am I dying?"</span>}],
+    model="system",
+    messages=[{"role": "user", "content": "What is the weather in Paris?"}],
     tools=tools,
-    tool_choice=<span style="color: #a5b4fc;">"required"</span> <span style="color: #64748b;"># Works flawlessly unlike Apple fm serve!</span>
+    tool_choice="required",
 )
 
-<span style="color: #6366f1;">for</span> tool_call <span style="color: #6366f1;">in</span> response.choices[0].message.tool_calls:
-    print(f<span style="color: #a5b4fc;">"Model requested tool: {tool_call.function.name}"</span>)</code></pre>
+for tool_call in response.choices[0].message.tool_calls:
+    print(tool_call.function.name, tool_call.function.arguments)</code></pre>
         </div>
 
         <!-- Tab 4: CLI -->
         <div id="tab-cli-oam" class="code-content">
-<pre><code class="language-bash"><span style="color: #64748b;"># 1. Grounded single-shot query forcing a tool call</span>
-oam respond <span style="color: #a5b4fc;">"Look up goblin chieftain stats"</span> \
-  --tool-json <span style="color: #a5b4fc;">'{"name":"lookup_monster","description":"Lookup monster HP and defense","parameters":{"type":"object","properties":{"name":{"type":"string"}}}}'</span> \
-  --tool-choice required
+<pre><code class="language-bash"><span style="color: #64748b;"># Force a tool call with an inline tool. A tool without a command is external:</span>
+<span style="color: #64748b;"># oam exits with code 10 and prints the pending calls and a transcript path.</span>
+oam respond 'How many potions do I have?' --tool-choice required \
+  --tool-json '{"name":"get_potions","description":"Count potions in the inventory","parameters":{"type":"object","properties":{}}}'
 
-<span style="color: #64748b;"># 2. Launch OpenAI-compatible local server</span>
-oam serve --port 8080 --host 127.0.0.1
+<span style="color: #64748b;"># OpenAI-compatible local server (127.0.0.1:1976)</span>
+oam serve
 
-<span style="color: #64748b;"># 3. Interactive live Tavern RPG NPC simulation</span>
+<span style="color: #64748b;"># Talk to Mira, an NPC innkeeper with a menu tool and a till</span>
 oam demo tavern
 
-<span style="color: #64748b;"># 4. Bridge JSON-RPC server over stdio for Unity / Godot</span>
-oam bridge --stdio</code></pre>
+<span style="color: #64748b;"># JSON-RPC bridge over stdin/stdout for game engines</span>
+oam stdio</code></pre>
         </div>
 
         <!-- Tab 5: JSON-RPC Bridge -->
         <div id="tab-jsonrpc" class="code-content">
-<pre><code class="language-json"><span style="color: #64748b;">// Request: Spawn NPC session over stdio JSON-RPC 2.0</span>
-{
-  <span style="color: #38bdf8;">"jsonrpc"</span>: <span style="color: #a5b4fc;">"2.0"</span>,
-  <span style="color: #38bdf8;">"id"</span>: 1,
-  <span style="color: #38bdf8;">"method"</span>: <span style="color: #a5b4fc;">"npc.create"</span>,
-  <span style="color: #38bdf8;">"params"</span>: {
-    <span style="color: #38bdf8;">"persona"</span>: {
-      <span style="color: #38bdf8;">"name"</span>: <span style="color: #a5b4fc;">"Eldrin"</span>,
-      <span style="color: #38bdf8;">"archetype"</span>: <span style="color: #a5b4fc;">"Elven Mage"</span>,
-      <span style="color: #38bdf8;">"tone"</span>: <span style="color: #a5b4fc;">"mysterious and ancient"</span>
-    },
-    <span style="color: #38bdf8;">"tools"</span>: [
-      {
-        <span style="color: #38bdf8;">"name"</span>: <span style="color: #a5b4fc;">"cast_spell"</span>,
-        <span style="color: #38bdf8;">"description"</span>: <span style="color: #a5b4fc;">"Cast arcane magic"</span>,
-        <span style="color: #38bdf8;">"parameters"</span>: {<span style="color: #38bdf8;">"type"</span>: <span style="color: #a5b4fc;">"object"</span>, <span style="color: #38bdf8;">"properties"</span>: {<span style="color: #38bdf8;">"spell"</span>: {<span style="color: #38bdf8;">"type"</span>: <span style="color: #a5b4fc;">"string"</span>}}}
-      }
-    ]
-  }
-}</code></pre>
+<pre><code class="language-text"><span style="color: #64748b;">// A client tool call over oam stdio, after initialize (id 1); some session/event notifications left out</span>
+→ {"jsonrpc":"2.0","id":2,"method":"session/create","params":{"session":"guard","instructions":"You are a castle guard. Use tools to act.","tools":[{"name":"open_gate","description":"Open a named gate.","parameters":{"type":"object","properties":{"gate":{"type":"string"}}}}],"options":{"toolChoice":"required"}}}
+→ {"jsonrpc":"2.0","id":3,"method":"session/respond","params":{"session":"guard","prompt":"Please open the north gate.","stream":true}}
+← {"jsonrpc":"2.0","id":"t-1","method":"tool/call","params":{"session":"guard","requestId":3,"call":{"id":"call_NYH7…","name":"open_gate","arguments":{"gate":"north"}}}}
+→ {"jsonrpc":"2.0","id":"t-1","result":{"output":{"opened":false,"reason":"the portcullis chain is jammed"}}}
+← {"jsonrpc":"2.0","id":3,"result":{"session":"guard","text":"The north gate remains shut because the portcullis chain is jammed.",…}}</code></pre>
         </div>
       </div>
     </div>
@@ -932,21 +904,21 @@ oam bridge --stdio</code></pre>
           <div class="feature-icon">📐</div>
           <h3><a href="ARCHITECTURE.md">Architecture &amp; Design &rarr;</a></h3>
           <p>
-            Detailed internal engineering breakdown: the 6 core SPM packages, loop mechanics, and lifecycle management.
+            Layers, a turn step by step, steering, errors and concurrency.
           </p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">🎮</div>
-          <h3><a href="GAMES.md">Game Engine Integration &rarr;</a></h3>
+          <h3><a href="GAMES.md">Game AI Layer &rarr;</a></h3>
           <p>
-            Integration blueprints for Unity, Godot 4, Unreal Engine 5, and custom C++ game engines via C ABI.
+            <code>WorldState</code>, <code>Persona</code>, <code>NPC</code>, <code>DecisionEngine</code>, <code>ContentGenerator</code>, prompting tips, guardrails and measured performance.
           </p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">📡</div>
           <h3><a href="PROTOCOL.md">JSON-RPC 2.0 Protocol &rarr;</a></h3>
           <p>
-            Full wire specification for <code>npc.talk</code>, <code>decision.decide</code>, <code>session.run</code>, and tool callbacks.
+            The JSON-RPC protocol v1.0: framing, ordering, <code>session/respond</code>, <code>tool/call</code>, <code>npc/talk</code>, <code>decision/decide</code> and the scripted model.
           </p>
         </div>
         <div class="feature-card">
@@ -960,14 +932,14 @@ oam bridge --stdio</code></pre>
           <div class="feature-icon">🌐</div>
           <h3><a href="SERVER.md">OpenAI HTTP Server Spec &rarr;</a></h3>
           <p>
-            Endpoint compatibility matrix, SSE event format, streaming chunk contracts, and error responses.
+            Request mapping, endpoints, errors, configuration, security, and a comparison with <code>fm serve</code>.
           </p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">📊</div>
           <h3><a href="RESEARCH.md">Probing Data &amp; Research &rarr;</a></h3>
           <p>
-            Reproducible test logs, NPU latency timings, failure traces of <code>fm serve</code>, and benchmark methodology.
+            Measurements of <code>fm</code>, <code>fm serve</code> and the framework that shaped the design, all on macOS 27.
           </p>
         </div>
       </div>
@@ -984,7 +956,7 @@ oam bridge --stdio</code></pre>
             <span>OpenAppleModels</span>
           </div>
           <p class="footer-desc">
-            Deterministic tool calling, autonomous agent loops, and local OpenAI serving for Apple Foundation Models. Part of the SpaceCorps high-performance software ecosystem.
+            Per-step tool calling, agent loops, game AI and a local OpenAI-compatible server for Apple's on-device Foundation Models. Android sibling: <a href="https://github.com/SpaceCorps/open-android-models">open-android-models</a> (pre-release).
           </p>
         </div>
         <div class="footer-col">
@@ -1023,10 +995,10 @@ oam bridge --stdio</code></pre>
 
       <div class="footer-bottom">
         <div>
-          &copy; 2026 SpaceCorps. Released under the <a href="https://opensource.org/licenses/MIT" target="_blank" rel="noopener noreferrer">MIT License</a>.
+          &copy; 2026 SpaceCorps Technology OÜ. Licensed under the <a href="https://opensource.org/licenses/MIT" target="_blank" rel="noopener noreferrer">MIT License</a>.
         </div>
         <div>
-          100% On-Device • Apple Intelligence • Zero Cloud Telemetry
+          On-Device • Apple Intelligence • No Telemetry
         </div>
       </div>
     </div>

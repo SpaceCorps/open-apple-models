@@ -1,6 +1,6 @@
 ---
 title: "OpenAppleModels | Real Tool Calling & Agent Loops for Apple Foundation Models"
-description: "Open-source developer runtime unlocking reliable tool calling, autonomous agent loops, episodic NPC memory, and an OpenAI-compatible local server for Apple Foundation Models."
+description: "MIT-licensed Swift package for per-step tool calling, agent loops, game NPC dialogue and decisions, and an OpenAI-compatible local server on Apple's on-device Foundation Models. Pre-release."
 author: "SpaceCorps"
 date: "2026-09-24"
 canonical: "https://spacecorps.github.io/open-apple-models/index.md"
@@ -8,13 +8,14 @@ canonical: "https://spacecorps.github.io/open-apple-models/index.md"
 
 # OpenAppleModels: Real Tool Calling & Agent Loops for Apple Foundation Models
 
-OpenAppleModels is an open-source Swift developer runtime and agent framework engineered by SpaceCorps. It unlocks reliable tool calling, autonomous agent loops, game NPC dialogue with episodic memory, and an OpenAI-compatible local server on Apple's on-device Foundation Models across iOS, iPadOS, macOS, and visionOS 27.
+OpenAppleModels (open-apple-models) is an MIT-licensed Swift package by SpaceCorps. It adds per-step tool calling, agent loops, game NPC dialogue with memory (facts, a relationship score and a summary), decisions, and an OpenAI-compatible local server on Apple's on-device Foundation Models across iOS, iPadOS, macOS, and visionOS 27.
 
 ## Key Highlights
 
 - **$0.00 Cloud Cost:** Runs on the device's built-in model by default. No API keys or cloud service.
-- **100% On-Device Privacy:** Zero network telemetry, zero data egress.
-- **333 Automated Tests:** 312 run in CI without Apple Intelligence (model-driven ones on the deterministic `ScriptedLanguageModel`); 21 live tests are opt-in (`OAM_LIVE_TESTS=1`).
+- **On-Device:** The package sends no telemetry.
+- **Pre-release:** no tagged releases yet (depend on `main`); all measurements come from macOS 27.
+- **333 Automated Tests:** 312 run in CI without Apple Intelligence (model-driven ones on the deterministic `ScriptedLanguageModel`); 21 are opt-in: 20 run against the real model with `OAM_LIVE_TESTS=1`, and one keeps a live server up for manual testing (`OAM_SERVE_SECONDS`).
 - **10/10 Valid Enum Decisions:** Constrained decoding for game AI choices (about 1.2 s each, measured on macOS 27).
 
 ---
@@ -26,12 +27,12 @@ Systematic testing on macOS 27 revealed critical limitations in Apple's built-in
 | Feature / Scenario | Apple Native (`fm serve` / SPM) | OpenAppleModels Runtime |
 |---|---|---|
 | **Tool Calls Emitted** | ✕ 0 / 54 Emitted (Model answered directly) | ✓ Returned as `tool_calls` |
-| **`tool_choice: "required"`** | ✕ HTTP 500 Internal Server Error | ✓ Guaranteed Step-1 Tool Execution |
-| **Multi-Turn Looping** | ✕ Infinite Tool-Calling Loop | ✓ Bounded Multi-Step Loop Control |
-| **Direct Response Fallback** | ✕ Forces unnecessary tool calls | ✓ `.explicit` invisible `respond_directly` |
+| **`tool_choice: "required"`** | ✕ HTTP 500 Internal Server Error | ✓ Forced on the first step, then the model answers |
+| **Multi-Turn Looping** | ✕ `.required` loops in Swift (40+ calls, 3 of 3 runs) | ✓ Round, call and per-step tool limits |
+| **Grounding without forced calls** | ✕ `.allowed` often skips tools and invents facts | ✓ `.explicit`: a tool or a built-in `respond_directly` |
 | **Game Engine Bridging** | ✕ Not Provided | ✓ JSON-RPC 2.0 (stdio) & C ABI (FFI) |
-| **NPC Dialogue & Memory** | ✕ None | ✓ Personas, Secrets, & Fact Extraction |
-| **CI/CD Offline Testing** | ✕ Hardware Required | ✓ `ScriptedLanguageModel` Offline Mock |
+| **NPC Dialogue & Memory** | ✕ None | ✓ Personas, facts, relationship score, secrets |
+| **Testing without Apple Intelligence** | ✕ Not included | ✓ `ScriptedLanguageModel` (tests still need a macOS 27 host) |
 
 ---
 
@@ -76,7 +77,7 @@ let response = try await agent.respond(
 print(response.text)   // answered from the tool's output
 ```
 
-### 2. Game NPC with Episodic Memory
+### 2. Game NPC with Memory
 
 ```swift
 import OpenAppleModelsGame

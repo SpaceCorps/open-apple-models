@@ -8,7 +8,7 @@ OpenAppleModels is 100% free, open-source software maintained by SpaceCorps unde
 - **Subscription Fees**: \$0.00.
 - **API Keys Required**: None.
 
-All inference runs directly on the user's Apple Silicon hardware (iPhone, iPad, Mac, Apple Vision Pro) via Apple's built-in Foundation Models. There are zero cloud server bills, zero rate limits, and zero external dependencies.
+Inference runs on the user's device through Apple's built-in Foundation Models, so there are no cloud server bills and no API keys. The system can still rate-limit requests under load (`oam` exit code 6), and use of the model is subject to Apple's [acceptable use requirements](https://developer.apple.com/apple-intelligence/acceptable-use-requirements-for-the-foundation-models-framework/).
 
 ## Licensing
 - **License**: [MIT License](https://github.com/SpaceCorps/open-apple-models/blob/main/LICENSE)

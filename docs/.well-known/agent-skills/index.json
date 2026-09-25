@@ -3,7 +3,7 @@
   "skills": [
     {
       "name": "open-apple-models",
-      "description": "Run on-device Apple Foundation Models with real per-step tool calling, game NPC dialogue with world memory, OpenAI-compatible local server, and Unity/Godot JSON-RPC bridge.",
+      "description": "Run on-device Apple Foundation Models with real per-step tool calling, game NPC dialogue and decisions, an OpenAI-compatible local server, and a JSON-RPC bridge for game engines (C, Python and Unity bindings).",
       "type": "skill-md",
       "url": "https://spacecorps.github.io/open-apple-models/llms.txt"
     }

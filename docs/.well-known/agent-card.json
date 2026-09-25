@@ -2,7 +2,7 @@
   "name": "OpenAppleModels Agent Interface",
   "description": "Real tool calling and autonomous agent runtime for Apple's on-device Foundation Models on iOS, iPadOS, macOS, and visionOS 27.",
   "url": "https://spacecorps.github.io/open-apple-models/",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "capabilities": ["tool-calling", "agent-loops", "npc-dialogue", "game-ai", "openai-server", "json-rpc"],
   "skills": [
     {
