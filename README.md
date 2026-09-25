@@ -9,7 +9,9 @@
 
 open-apple-models is a Swift package on Apple's FoundationModels framework (OS 27). It makes the on-device model usable as an agent: it calls tools when it should, stops when it should, and can hand each tool call to your own code, whether that is a Swift closure, a game engine, a shell script or an HTTP client. On top of that it has a game layer (NPC dialogue, decisions, content generation), the `oam` command-line tool, an OpenAI-compatible server that returns real `tool_calls`, and a JSON-RPC protocol that game engines reach over stdio or a C ABI. By default everything runs on the device's own model, with no API key or cloud service.
 
-> **Status: pre-release.** There are no tagged releases yet, so depend on `main`. The library reports version `0.1.0` and the protocol is v1.0. All measurements in this repository come from macOS 27 on an Apple silicon Mac. iOS, iPadOS and visionOS are supported targets (CI builds the Swift libraries for iOS), but nothing has been measured on an iPhone, iPad or Vision Pro yet.
+It is for game developers who want on-device NPCs and AI decisions on Apple platforms, and for anyone who needs real tool calls from Apple's model in Swift, from the command line or over an OpenAI-style HTTP API.
+
+> **Status: pre-release.** There are no tagged releases yet, so depend on `main`. The library reports version `0.1.0` and the protocol is v1.0. All measurements in this repository come from macOS 27 on an Apple silicon Mac. iOS, iPadOS and visionOS are supported targets: CI builds the four Swift libraries for iOS, and visionOS builds with Xcode 27 but is not built in CI. Nothing has been measured on an iPhone, iPad or Vision Pro yet.
 
 ## Why this exists
 
@@ -29,12 +31,23 @@ In Swift, `toolCallingMode: .required` applies to every step of the framework's 
 | | |
 |---|---|
 | OS | iOS, iPadOS, macOS or visionOS 27.0 or later (the minimum in `Package.swift`). |
-| Device | A device that supports Apple Intelligence, with Apple Intelligence turned on and the model downloaded. Check with `SystemLanguageModel.default.availability`, or `oam available` (exit code 3 and a `reason` when unavailable). Without it, everything still runs against the [scripted test model](#testing-without-apple-intelligence). |
+| Device | A device that supports Apple Intelligence, with Apple Intelligence turned on and the model downloaded. Check with `SystemLanguageModel.default.availability`, or `oam available` (exit code 3 and a `reason` when unavailable). Without it, you can still build, test and develop integrations against the [scripted model](#testing-without-apple-intelligence). |
 | Toolchain | A Swift 6 toolchain with the OS 27 SDKs (developed with Swift 6.4; the manifest's tools version is 6.2). macOS builds and tests work with only the Command Line Tools. iOS and visionOS builds need Xcode 27. |
 | Macros | FoundationModels' `@Generable` and `@Guide` macros need Xcode. This package doesn't use them. |
 | Apps embedding the C library | Set the minimum OS to 27.0. The library links FoundationModels 27 strongly, so on an older OS the app crashes at launch ([bindings/README.md](bindings/README.md)). |
 
 Use of the model is subject to Apple's [acceptable use requirements](https://developer.apple.com/apple-intelligence/acceptable-use-requirements-for-the-foundation-models-framework/).
+
+## Try it
+
+On a Mac with macOS 27 and Apple Intelligence turned on:
+
+```sh
+git clone https://github.com/SpaceCorps/open-apple-models
+cd open-apple-models
+swift run oam available        # {"available": true, "model": "system", "contextSize": 8192, ...}
+swift run oam demo tavern      # talk to Mira, an NPC innkeeper who checks a menu and takes your gold through tool calls
+```
 
 ## Install
 
@@ -99,7 +112,7 @@ let decision = try await gorm.respond(
         "choice": .string(enum: ["sell", "refuse", "haggle"]),
     ]),
     policy: ToolPolicy(choice: .tool("check_inventory")))
-print(decision.structured?["choice"] ?? "none")
+print(decision.structured?["choice"]?.stringValue ?? "none")
 ```
 
 ### Tools your game executes
@@ -182,7 +195,7 @@ The live run in docs/GAMES.md chose `flee` with confidence 75–78 in 1.3–1.5 
 
 ### Command line: `oam`
 
-`oam` works like Apple's `fm` and adds tools: shell commands become tools the model can call, and tools without a command are answered by your own program.
+`oam` works like Apple's `fm` and adds tools: shell commands become tools the model can call, and tools without a command are answered by your own program. A tools file holds OpenAI tool definitions ([format](docs/CLI.md#tools-files)).
 
 ```sh
 swift build -c release --product oam       # then copy .build/release/oam onto your PATH
@@ -190,11 +203,12 @@ swift build -c release --product oam       # then copy .build/release/oam onto y
 # Command tools (an "x-oam" block in the tools file) run locally: arguments JSON on stdin, output on stdout.
 oam respond --tools tools.json --tool-choice required 'What is the weather in Paris?'
 
-# A tool without a command is external: oam exits with code 10 and prints
-# {"status":"tool_calls","calls":[{"id", "name", "arguments"}],"transcript":"<path>"} ...
-oam respond --tools shop.json 'Where is my order A17?'
-# ...then you run the call and continue the same turn with its result.
-oam respond --resume "$transcript" --tool-output "$call_id"='{"status":"shipped","eta":"Friday"}'
+# A tool without a command is external: oam exits with code 10 and prints the pending calls
+# {"status":"tool_calls","calls":[{"id":…,"name":"lookup_order","arguments":{…}}],"transcript":"<path>"}
+oam respond --tools shop.json 'Where is my order A17?' > pending.json
+# Run the call yourself, then continue the same turn with its result.
+oam respond --resume "$(jq -r .transcript pending.json)" \
+  --tool-output "$(jq -r '.calls[0].id' pending.json)"='{"status":"shipped","eta":"Friday"}'
 
 oam chat --tools tools.json    # interactive, streaming, live tool calls
 oam serve                      # OpenAI-compatible server on 127.0.0.1:1976
@@ -202,7 +216,7 @@ oam stdio                      # JSON-RPC bridge over stdin/stdout
 oam demo tavern                # talk to Mira, an NPC innkeeper with a menu tool and a till
 ```
 
-Exit codes are stable (0 success, 1 failure, 2 usage, 3 model unavailable, 4 guardrail or refusal, 5 context exceeded, 6 rate limited, 10 tool calls pending). `--json` and `--events` give machine-readable output, `--tool-json` adds inline tools, and `oam agent-readme` prints a manual for AI agents. It reads `fm schema object` files and resumes `fm respond --save-transcript` files. See [docs/CLI.md](docs/CLI.md).
+Exit codes are stable (0 success, 1 failure, 2 usage, 3 model unavailable, 4 guardrail or refusal, 5 context exceeded, 6 rate limited, 10 tool calls pending, 130 interrupted). `--json` and `--events` give machine-readable output, `--tool-json` adds inline tools, and `oam agent-readme` prints a manual for AI agents. It reads `fm schema object` files and resumes `fm respond --save-transcript` files. See [docs/CLI.md](docs/CLI.md).
 
 ### OpenAI-compatible server
 
@@ -236,7 +250,7 @@ One JSON-RPC 2.0 protocol, v1.0 ([docs/PROTOCOL.md](docs/PROTOCOL.md)), over thr
 | C ABI | `libOpenAppleModelsFFI`: `oam_bridge_create`, `oam_bridge_send`, `oam_bridge_destroy`, `oam_call_blocking` | in-process hosts |
 | Swift | `BridgeEngine` | Swift hosts and tests |
 
-The model decides to call a tool, the bridge sends your engine a `tool/call` request, and the engine replies with the result:
+The model decides to call a tool, the bridge sends your engine a `tool/call` request, and the engine replies with the result. This exchange follows `initialize` (id 1); some `session/event` notifications are left out:
 
 ```text
 → {"jsonrpc":"2.0","id":2,"method":"session/create","params":{"session":"guard","instructions":"You are a castle guard. Use tools to act.","tools":[{"name":"open_gate","description":"Open a named gate.","parameters":{"type":"object","properties":{"gate":{"type":"string"}}}}],"options":{"toolChoice":"required"}}}
@@ -295,7 +309,7 @@ It is a small sample, and tool wording mattered as much as policy: a tool named 
 - **Ground facts.** Put small, always-relevant facts in `worldContextPaths` (no tool round), use a `groundingTool` for lookups the player asks about every turn, and keep `.explicit` otherwise. With `.auto` the model makes up plausible prices.
 - **Keep secrets out of the prompt.** The ~3B model leaked a "guarded" secret twice in about ten replies, so `Persona.secrets` stay out of the instructions until the relationship reaches `secretsUnlockAtRelationship` (default 50).
 - **Use enums for anything the game branches on**, and put `reasoning` before `choice`: the model generates properties in schema order.
-- **Stay small.** Keep about 3–5 tools per request (Apple's recommendation) and short personas. Every turn shares an 8,192-token context.
+- **Stay small.** Keep about 3–5 tools per request (Apple's recommendation) and short personas. Instructions, tool definitions and the conversation all share one 8,192-token context window.
 
 Measured latencies on macOS 27 ([docs/GAMES.md](docs/GAMES.md#performance-measured)):
 
@@ -363,7 +377,7 @@ The `docs` folder is also published as a site at [spacecorps.github.io/open-appl
 
 ## Android
 
-[open-android-models](https://github.com/SpaceCorps/open-android-models) is the Android sibling, built on Gemini Nano through the ML Kit GenAI Prompt API. It uses the same concepts and names and the same JSON-RPC protocol v1.0, so an engine can use this library on Apple platforms and that one on Android. Gemini Nano has no native tool calling, so tool use there is prompted and validated rather than constrained by the framework. It is earlier in development and has not yet run on a Gemini Nano device.
+[open-android-models](https://github.com/SpaceCorps/open-android-models) is the Android sibling, built on Gemini Nano through the ML Kit GenAI Prompt API. It uses the same concepts and names and the same JSON-RPC protocol v1.0, carried over JNI instead of stdio or a C ABI, so an engine can use this library on Apple platforms and that one on Android. Gemini Nano has no native tool calling, so tool use there is prompted and validated rather than constrained by the framework. It is earlier in development and has not yet run on a Gemini Nano device.
 
 ## Limitations and known issues
 
@@ -387,7 +401,7 @@ swift test --no-parallel \
   -Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing
 ```
 
-The suite has 333 Swift Testing tests in four targets. 21 of them run against the real model and are skipped unless you set `OAM_LIVE_TESTS=1` on a machine with Apple Intelligence. Other checks:
+The suite has 333 Swift Testing tests in four targets. 20 of them run against the real model and are skipped unless you set `OAM_LIVE_TESTS=1` on a machine with Apple Intelligence; one more only keeps a live server up for manual testing (`OAM_SERVE_SECONDS`). Other checks:
 
 - `scripts/smoke-test.sh` exercises every `oam` interface on the scripted model, then against the real model (`OAM_SKIP_LIVE=1` skips that part).
 - `swift build -c release --product OpenAppleModelsFFI && python3 -m unittest discover -s bindings/python -v` tests the Python binding through the C ABI.
